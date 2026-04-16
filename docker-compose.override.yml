@@ -1,0 +1,15 @@
+# docker-compose.override.yml
+# Mounts the project_data plugin and updated app/models into the container.
+# Run: docker-compose up -d (this file is loaded automatically)
+version: "3.4"
+services:
+  webapp:
+    volumes:
+      - ./coreplugins/project_data:/webodm/coreplugins/project_data:ro
+      - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
+      - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
+  worker:
+    volumes:
+      - ./coreplugins/project_data:/webodm/coreplugins/project_data:ro
+      - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
+      - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro

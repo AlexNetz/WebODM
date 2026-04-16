@@ -8,6 +8,8 @@ from .plugin import Plugin
 from .profile import Profile
 from .redirect import Redirect
 
+from coreplugins.project_data.models import ProjectEntry, ProjectEntryAttachment
+
 # deprecated
 def image_directory_path(image_upload, filename):
     raise Exception("Deprecated")

@@ -1,0 +1,13 @@
+{
+  "name": "Project Data",
+  "webodmMinVersion": "2.5.0",
+  "description": "Stores project-specific data: annotations, measurements, images, texts, and key-value pairs. Provides a REST API for structured per-project entries.",
+  "version": "1.0.0",
+  "author": "alex_netz",
+  "email": "alex@stonelove-klettergriffe.de",
+  "repository": "",
+  "tags": ["data", "annotations", "measurements", "reports"],
+  "homepage": "",
+  "experimental": false,
+  "deprecated": false
+}
