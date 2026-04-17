@@ -1,3 +1,4 @@
+from urllib.parse import quote
 from rest_framework import serializers
 from .models import ProjectEntry, ProjectEntryAttachment
 
@@ -11,17 +12,10 @@ class ProjectEntryAttachmentSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_url(self, obj):
-        request = self.context.get('request')
-        # URL to the download endpoint: /api/plugins/project_data/project/{pid}/entries/{eid}/attachments/{filename}/
         entry = obj.entry
-        path = 'project/{}/entries/{}/attachments/{}/'.format(
-            entry.project_id, entry.id, obj.filename
+        return '/api/plugins/project_data/project/{}/entries/{}/attachments/{}/'.format(
+            entry.project_id, entry.id, quote(obj.filename, safe='')
         )
-        if request:
-            return request.build_absolute_uri(
-                '/api/plugins/project_data/' + path
-            )
-        return '/api/plugins/project_data/' + path
 
 
 class ProjectEntrySerializer(serializers.ModelSerializer):
