@@ -4,6 +4,7 @@ import os
 from django.http import FileResponse
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser, JSONParser
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -17,6 +18,7 @@ class EntryListView(APIView):
     GET  /api/plugins/project_data/project/{project_pk}/entries/
     POST /api/plugins/project_data/project/{project_pk}/entries/
     """
+    permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, JSONParser]
 
     def get(self, request, project_pk=None):
@@ -70,6 +72,7 @@ class EntryDetailView(APIView):
     PATCH  /api/plugins/project_data/project/{project_pk}/entries/{entry_pk}/
     DELETE /api/plugins/project_data/project/{project_pk}/entries/{entry_pk}/
     """
+    permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, JSONParser]
 
     def _get_entry(self, request, project_pk, entry_pk, write=False):
@@ -122,6 +125,7 @@ class AttachView(APIView):
     """
     POST /api/plugins/project_data/project/{project_pk}/entries/{entry_pk}/attach/
     """
+    permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser]
 
     def post(self, request, project_pk=None, entry_pk=None):
@@ -152,6 +156,7 @@ class AttachmentDownloadView(APIView):
     """
     GET /api/plugins/project_data/project/{project_pk}/entries/{entry_pk}/attachments/{filename}/
     """
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, project_pk=None, entry_pk=None, filename=None):
         get_and_check_project(request, project_pk)
