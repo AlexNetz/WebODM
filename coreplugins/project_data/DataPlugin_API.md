@@ -2,7 +2,7 @@
 
 Dieses Dokument beschreibt die REST-API des **project_data**-Plugins für WebODM.
 Das Plugin stellt Endpunkte bereit, um projektspezifische Daten zu speichern:
-Anmerkungen, Messungen, Bilder, Texte/Berichte und beliebige Key-Value-Paare.
+Anmerkungen, Messungen, Bilder, Texte/Berichte, Flugrouten-Wegpunkte und beliebige Key-Value-Paare.
 
 ---
 
@@ -76,6 +76,7 @@ Der Token wird via `POST /api/token-auth/` bezogen und in `localStorage` als `ri
 | `text` | Freitext-Notiz | `content`-Feld für HTML, `data` für Metadaten |
 | `report` | Fertiggestellter Bericht | `content`-Feld für HTML-Inhalt des Berichts |
 | `keyvalue` | Beliebige Schlüssel-Wert-Paare | `{ key1: value1, key2: value2, ... }` |
+| `waypoint` | Flugrouten-Wegpunkt | `{ lat: number, lng: number, altitude: number, index: number, name?: string, speed?: number, actions?: object[] }` |
 
 ### ProjectEntryAttachment
 
@@ -281,7 +282,8 @@ export type EntryType =
   | 'image'
   | 'text'
   | 'report'
-  | 'keyvalue';
+  | 'keyvalue'
+  | 'waypoint';
 
 export interface Attachment {
   id: string;
@@ -339,6 +341,16 @@ export interface AnnotationData {
 
 export interface KeyValueData {
   [key: string]: string | number | boolean | null;
+}
+
+export interface WaypointData {
+  lat: number;
+  lng: number;
+  altitude: number;         // in Metern (AGL oder AMSL je nach Konfiguration)
+  index: number;            // Reihenfolge in der Flugroute (0-basiert)
+  name?: string;
+  speed?: number;           // m/s
+  actions?: Record<string, unknown>[];  // gerätespezifische Aktionen (Foto, Gimbal etc.)
 }
 ```
 

@@ -11,6 +11,7 @@ class ProjectEntry(models.Model):
     TEXT = 'text'
     REPORT = 'report'
     KEYVALUE = 'keyvalue'
+    WAYPOINT = 'waypoint'
 
     ENTRY_TYPES = [
         (ANNOTATION, 'Annotation'),
@@ -19,6 +20,7 @@ class ProjectEntry(models.Model):
         (TEXT, 'Text'),
         (REPORT, 'Report'),
         (KEYVALUE, 'Key-Value'),
+        (WAYPOINT, 'Waypoint'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
