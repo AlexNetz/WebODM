@@ -2,7 +2,7 @@
 
 Dieses Dokument beschreibt die REST-API des **project_data**-Plugins für WebODM.
 Das Plugin stellt Endpunkte bereit, um projektspezifische Daten zu speichern:
-Anmerkungen, Messungen, Bilder, Texte/Berichte, Flugrouten-Wegpunkte und beliebige Key-Value-Paare.
+Anmerkungen, Messungen, Bilder, Texte/Berichte, Flugrouten-Wegpunkte, Flächen-Ausschnitte und beliebige Key-Value-Paare.
 
 ---
 
@@ -77,6 +77,7 @@ Der Token wird via `POST /api/token-auth/` bezogen und in `localStorage` als `ri
 | `report` | Fertiggestellter Bericht | `content`-Feld für HTML-Inhalt des Berichts |
 | `keyvalue` | Beliebige Schlüssel-Wert-Paare | `{ key1: value1, key2: value2, ... }` |
 | `waypoint` | Flugrouten-Wegpunkt | `{ lat: number, lng: number, altitude: number, index: number, name?: string, speed?: number, actions?: object[] }` |
+| `area_cutout` | Ausschnitt/Loch innerhalb einer Flächenmessung | `{ linked_measurement_uuid: string, points: [x,y,z][] }` (verknüpft mit `potree_scene.measurements[].uuid`) |
 
 ### ProjectEntryAttachment
 
@@ -283,7 +284,8 @@ export type EntryType =
   | 'text'
   | 'report'
   | 'keyvalue'
-  | 'waypoint';
+  | 'waypoint'
+  | 'area_cutout';
 
 export interface Attachment {
   id: string;
@@ -351,6 +353,11 @@ export interface WaypointData {
   name?: string;
   speed?: number;           // m/s
   actions?: Record<string, unknown>[];  // gerätespezifische Aktionen (Foto, Gimbal etc.)
+}
+
+export interface AreaCutoutData {
+  linked_measurement_uuid: string;          // UUID der Außenflächenmessung aus potree_scene
+  points: [number, number, number][];       // 3D-Eckpunkte des Ausschnitts
 }
 ```
 
