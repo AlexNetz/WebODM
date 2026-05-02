@@ -81781,6 +81781,7 @@ ENDSEC
 			this.sceneControls = new Scene();
 
 			this.rotationSpeed = 5;
+			this.zoomSpeed = 1.0;   // Multiplikator für Mausrad-Zoom (< 1 = feinfühliger)
 
 			this.fadeFactor = 20;
 			this.yawDelta = 0;
@@ -81828,7 +81829,7 @@ ENDSEC
 			let scroll = (e) => {
 				let resolvedRadius = this.scene.view.radius + this.radiusDelta;
 
-				this.radiusDelta += -e.delta * resolvedRadius * 0.1;
+				this.radiusDelta += -e.delta * resolvedRadius * 0.1 * this.zoomSpeed;
 
 				this.stopTweens();
 			};
