@@ -86,7 +86,7 @@ def fit_plane_ransac(pts, iterations=500, threshold=0.08, min_inlier_ratio=0.04)
     best_mask = None
     best_count = 0
 
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng()   # no fixed seed — each call explores differently
     pts64 = pts.astype(np.float64)
 
     for _ in range(iterations):
@@ -163,9 +163,6 @@ def detect_planes(pts, n_planes=8, iterations=300, threshold=0.10,
         if result is None:
             break
         normal, d, mask = result
-        if abs(normal[2]) > 0.94:  # skip near-horizontal (residual ground)
-            remaining = remaining[~mask]
-            continue
         planes.append(Plane(normal, d, remaining[mask]))
         remaining = remaining[~mask]
 
@@ -223,9 +220,12 @@ def _classify_edge(plane_a, plane_b, start, end):
 def compute_edges(planes):
     edges = []
     n = len(planes)
+    # Only consider inclined planes (roof faces, not flat ground/ceiling remnants)
+    roof_planes = [p for p in planes if abs(p.normal[2]) < 0.90]
+    n = len(roof_planes)
     for i in range(n):
         for j in range(i + 1, n):
-            pa, pb = planes[i], planes[j]
+            pa, pb = roof_planes[i], roof_planes[j]
             result = _plane_intersection_line(pa, pb)
             if result is None:
                 continue
