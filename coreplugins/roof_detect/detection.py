@@ -11,7 +11,7 @@ import numpy as np
 
 # ── Point cloud loading via pdal ──────────────────────────────────────────────
 
-def load_pointcloud(path, sample_radius=0.12):
+def load_pointcloud(path):
     """
     Load and spatially downsample a point cloud using pdal.
     pdal reads in streaming chunks — Python memory stays minimal regardless of file size.
@@ -28,9 +28,10 @@ def load_pointcloud(path, sample_radius=0.12):
     pipeline = {
         "pipeline": [
             path,
-            # Poisson disk sampling: keeps spatially representative subset
-            # streaming in pdal — never loads full point cloud into memory
-            {"type": "filters.sample", "radius": sample_radius},
+            # filters.decimation is truly streaming: processes one point at a time,
+            # no buffering, no spatial index — memory bounded by chunk size only.
+            # step=100 on 20M points → 200k output points, plenty for RANSAC.
+            {"type": "filters.decimation", "step": 100},
             {
                 "type": "writers.text",
                 "format": "csv",
@@ -249,7 +250,7 @@ def run_detection(laz_path, progress_callback=None):
             progress_callback(msg, pct)
 
     _progress('Punktwolke samplen (pdal)…', 5)
-    pts = load_pointcloud(laz_path, sample_radius=0.12)
+    pts = load_pointcloud(laz_path)
 
     _progress('Downsampling…', 20)
     pts = voxel_downsample(pts, voxel=0.20)
