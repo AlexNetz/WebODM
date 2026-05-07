@@ -205,7 +205,7 @@ def _project_onto_line(pts, origin, direction):
     return (pts.astype(np.float64) - origin) @ direction
 
 
-def _clip_line_to_inliers(origin, direction, pts_a, pts_b, margin=0.0):
+def _clip_line_to_inliers(origin, direction, pts_a, pts_b, margin=1):
     t_a = _project_onto_line(pts_a, origin, direction)
     t_b = _project_onto_line(pts_b, origin, direction)
     t_all = np.concatenate([t_a, t_b])
@@ -264,7 +264,7 @@ def run_detection(laz_path, progress_callback=None):
     n_loaded = len(pts)
 
     _progress('Downsampling…', 20)
-    pts = voxel_downsample(pts, voxel=0.10)
+    pts = voxel_downsample(pts, voxel=0.05)
     n_voxel = len(pts)
 
     _progress('Bodenpunkte entfernen…', 30)
@@ -274,7 +274,7 @@ def run_detection(laz_path, progress_callback=None):
     # Keep only the top 20% of points by elevation.
     # For a house scan: ground fills 70-80% of scan area → top 20% ≈ walls + roof.
     # This is robust against sloped terrain where a fixed +Nm offset fails.
-    z_cutoff = float(np.percentile(pts[:, 2], 60))
+    z_cutoff = float(np.percentile(pts[:, 2], 40))
     pts = pts[pts[:, 2] > z_cutoff]
     n_ground = len(pts)
 
