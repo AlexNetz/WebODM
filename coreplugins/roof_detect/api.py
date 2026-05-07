@@ -9,17 +9,16 @@ from app.plugins.worker import run_function_async
 from worker.tasks import TestSafeAsyncResult
 
 
-def _run_detection_task(laz_path, project_id, task_id, progress_callback=None):
+def _run_detection_task(laz_path, project_id, task_id, plugin_dir, progress_callback=None):
     """
     Celery worker function: runs RANSAC detection and saves result to project_data.
     Must be self-contained (all imports inside) because run_function_async uses inspect.getsource().
+    plugin_dir is passed as argument because __file__ is not defined in eval() context.
     """
     import os
+    import sys
     from datetime import datetime, timezone
 
-    # Local import of detection pipeline
-    import sys
-    plugin_dir = os.path.dirname(os.path.abspath(__file__))
     if plugin_dir not in sys.path:
         sys.path.insert(0, plugin_dir)
     from detection import run_detection
@@ -31,17 +30,12 @@ def _run_detection_task(laz_path, project_id, task_id, progress_callback=None):
     _progress('Starte Erkennung…', 2)
 
     if not os.path.isfile(laz_path):
-        raise FileNotFoundError(f'LAZ-Datei nicht gefunden: {laz_path}')
+        raise FileNotFoundError(f'Punktwolke nicht gefunden: {laz_path}')
 
     result = run_detection(laz_path, progress_callback=_progress)
 
-    # Persist to project_data
-    import django
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'webodm.settings')
-
     from coreplugins.project_data.models import ProjectEntry
 
-    # Remove previous result for this task
     ProjectEntry.objects.filter(
         project_id=project_id,
         task_id=task_id,
@@ -64,29 +58,30 @@ def _run_detection_task(laz_path, project_id, task_id, progress_callback=None):
 
 
 class DetectView(TaskView):
-    """
-    POST  — start async detection, returns celery_task_id
-    """
-
     def post(self, request, pk=None, project_pk=None):
         task = self.get_and_check_task(request, pk)
 
         # Prefer uncompressed LAS (no lazrs backend needed); fall back to LAZ
-        laz_path = os.path.abspath(task.get_asset_download_path('georeferenced_model.las'))
-        if not os.path.isfile(laz_path):
-            laz_path = os.path.abspath(task.get_asset_download_path('georeferenced_model.laz'))
-        if not os.path.isfile(laz_path):
+        las_path = os.path.abspath(task.get_asset_download_path('georeferenced_model.las'))
+        laz_path = os.path.abspath(task.get_asset_download_path('georeferenced_model.laz'))
+        point_cloud_path = las_path if os.path.isfile(las_path) else (laz_path if os.path.isfile(laz_path) else None)
+
+        if point_cloud_path is None:
             return Response(
                 {'error': 'Keine Punktwolke gefunden (LAS/LAZ). Bitte zuerst eine ODM-Verarbeitung mit Punktwolke durchführen.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Compute plugin_dir here (where __file__ IS defined) and pass it as argument
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+
         try:
             celery_result = run_function_async(
                 _run_detection_task,
-                laz_path,
+                point_cloud_path,
                 str(task.project_id),
                 str(task.id),
+                plugin_dir,
                 with_progress=True,
             )
             return Response({'celery_task_id': celery_result.task_id}, status=status.HTTP_200_OK)
@@ -95,13 +90,8 @@ class DetectView(TaskView):
 
 
 class DetectStatusView(TaskView):
-    """
-    GET  — poll Celery task status
-    Response: {ready, status, progress, error?, edges?, plane_count?}
-    """
-
     def get(self, request, pk=None, project_pk=None, celery_task_id=None):
-        self.get_and_check_task(request, pk)  # permission check
+        self.get_and_check_task(request, pk)
 
         res = TestSafeAsyncResult(celery_task_id)
 
@@ -131,10 +121,6 @@ class DetectStatusView(TaskView):
 
 
 class ResultView(TaskView):
-    """
-    DELETE  — remove stored roof_outline entry for this task
-    """
-
     def delete(self, request, pk=None, project_pk=None):
         task = self.get_and_check_task(request, pk)
 
