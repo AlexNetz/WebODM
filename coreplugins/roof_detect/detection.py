@@ -297,13 +297,19 @@ def run_detection(laz_path, progress_callback=None):
     pts = load_pointcloud(laz_path)
 
     _progress('Downsampling…', 15)
-    pts = voxel_downsample(pts, voxel=0.15)
+    # Coarse voxel first to limit memory — 0.4 m keeps enough structure for plane detection
+    pts = voxel_downsample(pts, voxel=0.40)
+
+    # Hard cap at 120k points — RANSAC doesn't need more for plane fitting
+    if len(pts) > 120_000:
+        idx = np.random.default_rng(42).choice(len(pts), 120_000, replace=False)
+        pts = pts[idx]
 
     _progress('Bodenpunkte entfernen…', 25)
     pts = remove_ground(pts)
 
     _progress('Dachebenen erkennen (RANSAC)…', 35)
-    planes = detect_planes(pts, n_planes=12, iterations=600, threshold=0.08)
+    planes = detect_planes(pts, n_planes=8, iterations=300, threshold=0.10)
 
     _progress('Schnittlinien berechnen…', 75)
     edges = compute_edges(planes)
