@@ -50,16 +50,35 @@ def _load_las(path):
 
 
 def _laz_to_las_via_pdal(laz_path):
-    """Convert LAZ to uncompressed LAS using pdal CLI. Returns path to temp LAS file."""
-    import subprocess
-    import tempfile
-    import os
-    fd, las_tmp = tempfile.mkstemp(suffix='.las')
-    os.close(fd)
-    subprocess.run(
-        ['pdal', 'translate', laz_path, las_tmp],
-        check=True, capture_output=True
-    )
+    """
+    Convert LAZ to a downsampled LAS using a pdal pipeline.
+    Decimation (step=50) runs inside pdal before any data enters Python memory —
+    for a 20M-point cloud this yields ~400k points, enough for RANSAC.
+    """
+    import json, subprocess, tempfile, os
+
+    fd_las,  las_tmp  = tempfile.mkstemp(suffix='.las')
+    fd_json, json_tmp = tempfile.mkstemp(suffix='.json')
+    os.close(fd_las)
+    os.close(fd_json)
+
+    pipeline = {
+        "pipeline": [
+            laz_path,
+            {"type": "filters.decimation", "step": 50},
+            las_tmp
+        ]
+    }
+    try:
+        with open(json_tmp, 'w') as f:
+            json.dump(pipeline, f)
+        subprocess.run(['pdal', 'pipeline', json_tmp], check=True, capture_output=True)
+    finally:
+        try:
+            os.unlink(json_tmp)
+        except OSError:
+            pass
+
     return las_tmp
 
 
