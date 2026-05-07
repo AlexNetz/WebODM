@@ -11,12 +11,21 @@ import numpy as np
 
 # ── Point cloud loading via pdal ──────────────────────────────────────────────
 
+def get_laz_z_offset(path):
+    """
+    Read the Z header offset from the original LAZ/LAS file without loading all points.
+    pdal strips this offset when converting, so we need to add it back to restored coords.
+    """
+    import laspy
+    with laspy.open(path) as f:
+        return float(f.header.offset[2])
+
+
 def load_pointcloud(path):
     """
     Load and spatially downsample a point cloud using pdal.
     pdal reads in streaming chunks — Python memory stays minimal regardless of file size.
-    sample_radius=0.12 m yields ~70 pts/m², plenty for RANSAC on roof planes.
-    Returns float32 (N,3) array.
+    Returns float32 (N,3) array with CORRECTED Z coordinates (pdal strips header Z offset).
     """
     import json, subprocess, tempfile, os
 
@@ -53,6 +62,10 @@ def load_pointcloud(path):
         x = np.array(las.x, dtype=np.float64)
         y = np.array(las.y, dtype=np.float64)
         z = np.array(las.z, dtype=np.float64)
+        # pdal strips the LAS header Z offset when writing the output file.
+        # Re-apply the original offset so coordinates match Potree's measurement space.
+        z_offset = get_laz_z_offset(path)
+        z += z_offset
         return np.column_stack([x, y, z]).astype(np.float32)
     finally:
         for tmp in [json_tmp, las_tmp]:
