@@ -1,2 +1,2 @@
-laspy>=2.0
-plyfile>=0.7
+# pdal CLI is used for point cloud I/O (already available in WebODM containers)
+# No Python packages required for point cloud reading
