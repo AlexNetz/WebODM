@@ -20,25 +20,20 @@ def load_pointcloud(path):
     """
     import json, subprocess, tempfile, os
 
-    fd_csv,  csv_tmp  = tempfile.mkstemp(suffix='.csv')
     fd_json, json_tmp = tempfile.mkstemp(suffix='.json')
-    os.close(fd_csv)
     os.close(fd_json)
+
+    # Write to LAS (binary) — laspy reads it in milliseconds vs. np.loadtxt on CSV
+    fd_las,  las_tmp  = tempfile.mkstemp(suffix='.las')
+    os.close(fd_las)
 
     pipeline = {
         "pipeline": [
             path,
-            # filters.decimation is truly streaming: processes one point at a time,
-            # no buffering, no spatial index — memory bounded by chunk size only.
-            # step=100 on 20M points → 200k output points, plenty for RANSAC.
+            # Truly streaming: no buffering, processes one point at a time.
+            # step=100 on 20M points → ~200k output, plenty for RANSAC.
             {"type": "filters.decimation", "step": 100},
-            {
-                "type": "writers.text",
-                "format": "csv",
-                "order": "X,Y,Z",
-                "keep_unspecified": "false",
-                "filename": csv_tmp,
-            },
+            las_tmp,
         ]
     }
 
@@ -53,12 +48,14 @@ def load_pointcloud(path):
             raise RuntimeError(
                 f'pdal pipeline failed: {result.stderr.decode(errors="replace")[:500]}'
             )
-        pts = np.loadtxt(csv_tmp, delimiter=',', skiprows=1, usecols=(0, 1, 2))
-        if pts.ndim == 1:
-            pts = pts.reshape(1, 3)
-        return pts.astype(np.float32)
+        import laspy
+        las = laspy.read(las_tmp)
+        x = np.array(las.x, dtype=np.float64)
+        y = np.array(las.y, dtype=np.float64)
+        z = np.array(las.z, dtype=np.float64)
+        return np.column_stack([x, y, z]).astype(np.float32)
     finally:
-        for tmp in [json_tmp, csv_tmp]:
+        for tmp in [json_tmp, las_tmp]:
             try:
                 os.unlink(tmp)
             except OSError:
