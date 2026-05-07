@@ -286,6 +286,14 @@ def run_detection(laz_path, progress_callback=None):
     _progress('Schnittlinien berechnen…', 80)
     edges = compute_edges(planes)
 
+    # Filter spurious edges: midpoint must lie within the Z range of the input points
+    # (edges outside this range are mathematical artefacts between non-adjacent planes)
+    if len(pts) > 0:
+        z_roof_min = float(pts[:, 2].min()) - 1.0
+        z_roof_max = float(pts[:, 2].max()) + 2.0
+        edges = [e for e in edges
+                 if z_roof_min <= (e['start'][2] + e['end'][2]) / 2 <= z_roof_max]
+
     _progress('Fertig', 100)
     roof_planes = [p for p in planes if abs(p.normal[2]) < 0.90]
     return {
