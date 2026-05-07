@@ -1,2 +1,1 @@
 laspy>=2.0
-lazrs-python

@@ -71,13 +71,13 @@ class DetectView(TaskView):
     def post(self, request, pk=None, project_pk=None):
         task = self.get_and_check_task(request, pk)
 
-        laz_path = os.path.abspath(task.get_asset_download_path('georeferenced_model.laz'))
+        # Prefer uncompressed LAS (no lazrs backend needed); fall back to LAZ
+        laz_path = os.path.abspath(task.get_asset_download_path('georeferenced_model.las'))
         if not os.path.isfile(laz_path):
-            # Fall back to LAS
-            laz_path = os.path.abspath(task.get_asset_download_path('georeferenced_model.las'))
+            laz_path = os.path.abspath(task.get_asset_download_path('georeferenced_model.laz'))
         if not os.path.isfile(laz_path):
             return Response(
-                {'error': 'Keine Punktwolke gefunden (LAZ/LAS). Bitte zuerst eine ODM-Verarbeitung mit Punktwolke durchführen.'},
+                {'error': 'Keine Punktwolke gefunden (LAS/LAZ). Bitte zuerst eine ODM-Verarbeitung mit Punktwolke durchführen.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
