@@ -77,7 +77,7 @@ def load_pointcloud(path):
 
 # ── Voxel downsampling (safety net after pdal load) ───────────────────────────
 
-def voxel_downsample(pts, voxel=0.20):
+def voxel_downsample(pts, voxel=0.10):
     """Reduce point cloud to ~1 point per voxel cell using numpy unique."""
     keys = np.floor(pts / voxel).astype(np.int32)
     _, idx = np.unique(keys, axis=0, return_index=True)
@@ -86,7 +86,7 @@ def voxel_downsample(pts, voxel=0.20):
 
 # ── RANSAC plane fit ──────────────────────────────────────────────────────────
 
-def fit_plane_ransac(pts, iterations=500, threshold=0.08, min_inlier_ratio=0.04):
+def fit_plane_ransac(pts, iterations=1000, threshold=0.10, min_inlier_ratio=0.02):
     """
     Fit a plane to pts via RANSAC.
     Returns (normal, d, inlier_mask) or None if not enough inliers.
@@ -141,7 +141,7 @@ def fit_plane_ransac(pts, iterations=500, threshold=0.08, min_inlier_ratio=0.04)
 
 # ── Ground removal ─────────────────────────────────────────────────────────────
 
-def remove_ground(pts, iterations=200, threshold=0.15, max_slope_cos=0.26):
+def remove_ground(pts, iterations=400, threshold=0.15, max_slope_cos=0.1):
     """Remove the dominant near-horizontal plane (ground)."""
     result = fit_plane_ransac(pts, iterations=iterations, threshold=threshold)
     if result is None:
@@ -162,8 +162,8 @@ class Plane:
         self.center = points.mean(axis=0).astype(np.float64)
 
 
-def detect_planes(pts, n_planes=8, iterations=300, threshold=0.10,
-                  min_inlier_ratio=0.04, stop_fraction=0.05):
+def detect_planes(pts, n_planes=15, iterations=500, threshold=0.10,
+                  min_inlier_ratio=0.02, stop_fraction=0.05):
     remaining = pts.copy()
     total = len(pts)
     planes = []
@@ -205,7 +205,7 @@ def _project_onto_line(pts, origin, direction):
     return (pts.astype(np.float64) - origin) @ direction
 
 
-def _clip_line_to_inliers(origin, direction, pts_a, pts_b, margin=0.5):
+def _clip_line_to_inliers(origin, direction, pts_a, pts_b, margin=0.0):
     t_a = _project_onto_line(pts_a, origin, direction)
     t_b = _project_onto_line(pts_b, origin, direction)
     t_all = np.concatenate([t_a, t_b])
@@ -234,7 +234,7 @@ def compute_edges(planes):
     edges = []
     n = len(planes)
     # Only consider inclined planes (roof faces, not flat ground/ceiling remnants)
-    roof_planes = [p for p in planes if abs(p.normal[2]) < 0.90]
+    roof_planes = [p for p in planes if abs(p.normal[2]) < 0.9848]
     n = len(roof_planes)
     for i in range(n):
         for j in range(i + 1, n):
@@ -274,13 +274,13 @@ def run_detection(laz_path, progress_callback=None):
     # Keep only the top 20% of points by elevation.
     # For a house scan: ground fills 70-80% of scan area → top 20% ≈ walls + roof.
     # This is robust against sloped terrain where a fixed +Nm offset fails.
-    z_cutoff = float(np.percentile(pts[:, 2], 70))
+    z_cutoff = float(np.percentile(pts[:, 2], 60))
     pts = pts[pts[:, 2] > z_cutoff]
     n_ground = len(pts)
 
     _progress('Dachebenen erkennen (RANSAC)…', 40)
     # Lenient parameters: low inlier ratio, more iterations, looser threshold
-    planes = detect_planes(pts, n_planes=10, iterations=1000,
+    planes = detect_planes(pts, n_planes=15, iterations=1000,
                            threshold=0.15, min_inlier_ratio=0.01)
 
     _progress('Schnittlinien berechnen…', 80)
