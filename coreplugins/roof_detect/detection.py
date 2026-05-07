@@ -267,12 +267,15 @@ def run_detection(laz_path, progress_callback=None):
     edges = compute_edges(planes)
 
     _progress('Fertig', 100)
+    roof_planes = [p for p in planes if abs(p.normal[2]) < 0.90]
     return {
         'edges': edges,
         'plane_count': len(planes),
         'debug': {
-            'n_loaded':  n_loaded,
-            'n_voxel':   n_voxel,
+            'n_loaded':       n_loaded,
+            'n_voxel':        n_voxel,
             'n_after_ground': n_ground,
+            'n_roof_planes':  len(roof_planes),
+            'normals_z':      [round(float(p.normal[2]), 3) for p in planes],
         },
     }
