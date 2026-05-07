@@ -246,17 +246,22 @@ def run_detection(laz_path, progress_callback=None):
         if progress_callback:
             progress_callback(msg, pct)
 
-    _progress('Punktwolke samplen (pdal)…', 5)
+    _progress('Punktwolke laden (pdal)…', 5)
     pts = load_pointcloud(laz_path)
+    n_loaded = len(pts)
 
     _progress('Downsampling…', 20)
-    pts = voxel_downsample(pts, voxel=0.20)
+    pts = voxel_downsample(pts, voxel=0.30)
+    n_voxel = len(pts)
 
     _progress('Bodenpunkte entfernen…', 30)
     pts = remove_ground(pts)
+    n_ground = len(pts)
 
     _progress('Dachebenen erkennen (RANSAC)…', 40)
-    planes = detect_planes(pts, n_planes=8, iterations=300, threshold=0.10)
+    # Lenient parameters: low inlier ratio, more iterations, looser threshold
+    planes = detect_planes(pts, n_planes=10, iterations=800,
+                           threshold=0.15, min_inlier_ratio=0.005)
 
     _progress('Schnittlinien berechnen…', 80)
     edges = compute_edges(planes)
@@ -265,4 +270,9 @@ def run_detection(laz_path, progress_callback=None):
     return {
         'edges': edges,
         'plane_count': len(planes),
+        'debug': {
+            'n_loaded':  n_loaded,
+            'n_voxel':   n_voxel,
+            'n_after_ground': n_ground,
+        },
     }
