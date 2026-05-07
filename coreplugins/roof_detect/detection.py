@@ -8,10 +8,31 @@ import numpy as np
 
 # ── Point cloud loading ────────────────────────────────────────────────────────
 
-def load_pointcloud(laz_path):
-    """Load XYZ from LAZ/LAS file via laspy. Returns float32 (N,3) array."""
+def load_pointcloud(path):
+    """
+    Load XYZ from PLY or LAS/LAZ file. Returns float32 (N,3) array.
+    PLY is preferred — no compression backend required.
+    """
+    if path.lower().endswith('.ply'):
+        return _load_ply(path)
+    return _load_las(path)
+
+
+def _load_ply(path):
+    """Read XYZ from a PLY point cloud via plyfile."""
+    from plyfile import PlyData
+    ply = PlyData.read(path)
+    v = ply['vertex']
+    x = np.array(v['x'], dtype=np.float64)
+    y = np.array(v['y'], dtype=np.float64)
+    z = np.array(v['z'], dtype=np.float64)
+    return np.column_stack([x, y, z]).astype(np.float32)
+
+
+def _load_las(path):
+    """Read XYZ from LAS/LAZ file via laspy (requires lazrs backend for .laz)."""
     import laspy
-    las = laspy.read(laz_path)
+    las = laspy.read(path)
     x = np.array(las.x, dtype=np.float64)
     y = np.array(las.y, dtype=np.float64)
     z = np.array(las.z, dtype=np.float64)

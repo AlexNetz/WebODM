@@ -1,1 +1,2 @@
 laspy>=2.0
+plyfile>=0.7
