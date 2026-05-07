@@ -274,7 +274,7 @@ def run_detection(laz_path, progress_callback=None):
     # Keep only the top 20% of points by elevation.
     # For a house scan: ground fills 70-80% of scan area → top 20% ≈ walls + roof.
     # This is robust against sloped terrain where a fixed +Nm offset fails.
-    z_cutoff = float(np.percentile(pts[:, 2], 80))
+    z_cutoff = float(np.percentile(pts[:, 2], 50))
     pts = pts[pts[:, 2] > z_cutoff]
     n_ground = len(pts)
 
