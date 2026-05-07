@@ -230,7 +230,16 @@ def _classify_edge(plane_a, plane_b, start, end):
     return 'hip'
 
 
-def compute_edges(planes, normal_z_max=0.9848, margin=1.0):
+def _bbox_gap_2d(pts_a, pts_b):
+    """XY bounding-box gap between two point clouds. 0 if they overlap."""
+    dx = max(float(pts_a[:, 0].min() - pts_b[:, 0].max()),
+             float(pts_b[:, 0].min() - pts_a[:, 0].max()), 0.0)
+    dy = max(float(pts_a[:, 1].min() - pts_b[:, 1].max()),
+             float(pts_b[:, 1].min() - pts_a[:, 1].max()), 0.0)
+    return float(np.sqrt(dx * dx + dy * dy))
+
+
+def compute_edges(planes, normal_z_max=0.9848, margin=1.0, parallel_cos=0.97, max_gap=5.0):
     edges = []
     n = len(planes)
     # Only consider inclined planes (roof faces, not flat ground/ceiling remnants)
@@ -239,6 +248,12 @@ def compute_edges(planes, normal_z_max=0.9848, margin=1.0):
     for i in range(n):
         for j in range(i + 1, n):
             pa, pb = roof_planes[i], roof_planes[j]
+            # Skip near-parallel planes — likely the same physical surface split by RANSAC
+            if abs(float(np.dot(pa.normal, pb.normal))) > parallel_cos:
+                continue
+            # Skip non-adjacent planes — their intersection would float through empty space
+            if _bbox_gap_2d(pa.points, pb.points) > max_gap:
+                continue
             result = _plane_intersection_line(pa, pb)
             if result is None:
                 continue
@@ -257,7 +272,8 @@ def compute_edges(planes, normal_z_max=0.9848, margin=1.0):
 def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                   height_percentile=40, n_planes=15, iterations=1000,
                   threshold=0.15, min_inlier_ratio=0.01,
-                  normal_z_max=0.9848, margin=1.0, progress_callback=None):
+                  normal_z_max=0.9848, margin=1.0,
+                  parallel_cos=0.97, max_gap=5.0, progress_callback=None):
     def _progress(msg, pct):
         if progress_callback:
             progress_callback(msg, pct)
@@ -287,7 +303,8 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                            threshold=threshold, min_inlier_ratio=min_inlier_ratio)
 
     _progress('Schnittlinien berechnen…', 80)
-    edges = compute_edges(planes, normal_z_max=normal_z_max, margin=margin)
+    edges = compute_edges(planes, normal_z_max=normal_z_max, margin=margin,
+                          parallel_cos=parallel_cos, max_gap=max_gap)
 
     # Filter spurious edges: midpoint must lie within the Z range of the input points
     # (edges outside this range are mathematical artefacts between non-adjacent planes)

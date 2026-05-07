@@ -13,6 +13,7 @@ SETTING_DEFAULTS = {
     'decimation_step': 100, 'voxel_size': 0.05, 'height_percentile': 40,
     'n_planes': 15, 'iterations': 1000, 'threshold': 0.15,
     'min_inlier_ratio': 0.01, 'normal_z_max': 0.9848, 'margin': 1.0,
+    'parallel_cos': 0.97, 'max_gap': 5.0,
 }
 
 
