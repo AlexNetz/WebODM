@@ -73,10 +73,15 @@ class DetectView(TaskView):
         )
 
         if point_cloud_path is None:
+            checked = ', '.join(os.path.abspath(p) for p in candidates)
             return Response(
-                {'error': 'Keine Punktwolke gefunden (PLY/LAS/LAZ). Bitte zuerst eine ODM-Verarbeitung mit Punktwolke durchführen.'},
+                {'error': f'Keine Punktwolke gefunden. Gesucht in: {checked}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        # Tell the frontend which file we're using (helps debug format issues)
+        import logging
+        logging.getLogger(__name__).info(f'[roof_detect] Using point cloud: {point_cloud_path}')
 
         # Compute plugin_dir here (where __file__ IS defined) and pass it as argument
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
