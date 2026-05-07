@@ -264,7 +264,7 @@ def run_detection(laz_path, progress_callback=None):
     n_loaded = len(pts)
 
     _progress('Downsampling…', 20)
-    pts = voxel_downsample(pts, voxel=0.30)
+    pts = voxel_downsample(pts, voxel=0.10)
     n_voxel = len(pts)
 
     _progress('Bodenpunkte entfernen…', 30)
