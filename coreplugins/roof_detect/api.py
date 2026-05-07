@@ -21,6 +21,10 @@ def _run_detection_task(laz_path, project_id, task_id, plugin_dir, progress_call
 
     if plugin_dir not in sys.path:
         sys.path.insert(0, plugin_dir)
+    # Force fresh import on every call — Celery workers are long-lived and
+    # would otherwise serve stale code from sys.modules cache after deployments.
+    if 'detection' in sys.modules:
+        del sys.modules['detection']
     from detection import run_detection
 
     def _progress(msg, pct):
