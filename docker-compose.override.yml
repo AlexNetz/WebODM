@@ -6,10 +6,12 @@ services:
   webapp:
     volumes:
       - ./coreplugins/project_data:/webodm/coreplugins/project_data:ro
+      - ./coreplugins/roof_detect:/webodm/coreplugins/roof_detect:ro
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
   worker:
     volumes:
       - ./coreplugins/project_data:/webodm/coreplugins/project_data:ro
+      - ./coreplugins/roof_detect:/webodm/coreplugins/roof_detect:ro
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro

@@ -1,0 +1,10 @@
+{
+  "name": "Roof Detect",
+  "webodmMinVersion": "2.5.0",
+  "description": "Automatic roof plane detection via RANSAC on ODM point clouds. Computes ridge, hip, valley and eave edges and stores them for display in Roof-S.",
+  "version": "1.0.0",
+  "author": "alex_netz",
+  "email": "alex@stonelove-klettergriffe.de",
+  "tags": ["roof", "detection", "pointcloud", "ransac"],
+  "experimental": false
+}
