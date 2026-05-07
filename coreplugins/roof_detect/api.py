@@ -9,7 +9,14 @@ from app.plugins.worker import run_function_async
 from worker.tasks import TestSafeAsyncResult
 
 
-def _run_detection_task(laz_path, project_id, task_id, plugin_dir, progress_callback=None):
+SETTING_DEFAULTS = {
+    'decimation_step': 100, 'voxel_size': 0.05, 'height_percentile': 40,
+    'n_planes': 15, 'iterations': 1000, 'threshold': 0.15,
+    'min_inlier_ratio': 0.01, 'normal_z_max': 0.9848, 'margin': 1.0,
+}
+
+
+def _run_detection_task(laz_path, project_id, task_id, plugin_dir, settings, progress_callback=None):
     """
     Celery worker function: runs RANSAC detection and saves result to project_data.
     Must be self-contained (all imports inside) because run_function_async uses inspect.getsource().
@@ -36,7 +43,7 @@ def _run_detection_task(laz_path, project_id, task_id, plugin_dir, progress_call
     if not os.path.isfile(laz_path):
         raise FileNotFoundError(f'Punktwolke nicht gefunden: {laz_path}')
 
-    result = run_detection(laz_path, progress_callback=_progress)
+    result = run_detection(laz_path, **settings, progress_callback=_progress)
 
     from coreplugins.project_data.models import ProjectEntry
 
@@ -92,6 +99,8 @@ class DetectView(TaskView):
         # Compute plugin_dir here (where __file__ IS defined) and pass it as argument
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
 
+        settings = {k: request.data.get(k, v) for k, v in SETTING_DEFAULTS.items()}
+
         try:
             celery_result = run_function_async(
                 _run_detection_task,
@@ -99,6 +108,7 @@ class DetectView(TaskView):
                 str(task.project_id),
                 str(task.id),
                 plugin_dir,
+                settings,
                 with_progress=True,
             )
             return Response({'celery_task_id': celery_result.task_id}, status=status.HTTP_200_OK)

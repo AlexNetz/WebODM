@@ -21,7 +21,7 @@ def get_laz_z_offset(path):
         return float(f.header.offset[2])
 
 
-def load_pointcloud(path):
+def load_pointcloud(path, decimation_step=100):
     """
     Load and spatially downsample a point cloud using pdal.
     pdal reads in streaming chunks — Python memory stays minimal regardless of file size.
@@ -41,7 +41,7 @@ def load_pointcloud(path):
             path,
             # Truly streaming: no buffering, processes one point at a time.
             # step=100 on 20M points → ~200k output, plenty for RANSAC.
-            {"type": "filters.decimation", "step": 100},
+            {"type": "filters.decimation", "step": decimation_step},
             las_tmp,
         ]
     }
@@ -230,11 +230,11 @@ def _classify_edge(plane_a, plane_b, start, end):
     return 'hip'
 
 
-def compute_edges(planes):
+def compute_edges(planes, normal_z_max=0.9848, margin=1.0):
     edges = []
     n = len(planes)
     # Only consider inclined planes (roof faces, not flat ground/ceiling remnants)
-    roof_planes = [p for p in planes if abs(p.normal[2]) < 0.9848]
+    roof_planes = [p for p in planes if abs(p.normal[2]) < normal_z_max]
     n = len(roof_planes)
     for i in range(n):
         for j in range(i + 1, n):
@@ -243,7 +243,7 @@ def compute_edges(planes):
             if result is None:
                 continue
             origin, direction = result
-            clipped = _clip_line_to_inliers(origin, direction, pa.points, pb.points)
+            clipped = _clip_line_to_inliers(origin, direction, pa.points, pb.points, margin=margin)
             if clipped is None:
                 continue
             start, end = clipped
@@ -254,17 +254,20 @@ def compute_edges(planes):
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
-def run_detection(laz_path, progress_callback=None):
+def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
+                  height_percentile=40, n_planes=15, iterations=1000,
+                  threshold=0.15, min_inlier_ratio=0.01,
+                  normal_z_max=0.9848, margin=1.0, progress_callback=None):
     def _progress(msg, pct):
         if progress_callback:
             progress_callback(msg, pct)
 
     _progress('Punktwolke laden (pdal)…', 5)
-    pts = load_pointcloud(laz_path)
+    pts = load_pointcloud(laz_path, decimation_step=decimation_step)
     n_loaded = len(pts)
 
     _progress('Downsampling…', 20)
-    pts = voxel_downsample(pts, voxel=0.05)
+    pts = voxel_downsample(pts, voxel=voxel_size)
     n_voxel = len(pts)
 
     _progress('Bodenpunkte entfernen…', 30)
@@ -274,17 +277,17 @@ def run_detection(laz_path, progress_callback=None):
     # Keep only the top 20% of points by elevation.
     # For a house scan: ground fills 70-80% of scan area → top 20% ≈ walls + roof.
     # This is robust against sloped terrain where a fixed +Nm offset fails.
-    z_cutoff = float(np.percentile(pts[:, 2], 40))
+    z_cutoff = float(np.percentile(pts[:, 2], height_percentile))
     pts = pts[pts[:, 2] > z_cutoff]
     n_ground = len(pts)
 
     _progress('Dachebenen erkennen (RANSAC)…', 40)
     # Lenient parameters: low inlier ratio, more iterations, looser threshold
-    planes = detect_planes(pts, n_planes=15, iterations=1000,
-                           threshold=0.15, min_inlier_ratio=0.01)
+    planes = detect_planes(pts, n_planes=n_planes, iterations=iterations,
+                           threshold=threshold, min_inlier_ratio=min_inlier_ratio)
 
     _progress('Schnittlinien berechnen…', 80)
-    edges = compute_edges(planes)
+    edges = compute_edges(planes, normal_z_max=normal_z_max, margin=margin)
 
     # Filter spurious edges: midpoint must lie within the Z range of the input points
     # (edges outside this range are mathematical artefacts between non-adjacent planes)
@@ -295,7 +298,7 @@ def run_detection(laz_path, progress_callback=None):
                  if z_roof_min <= (e['start'][2] + e['end'][2]) / 2 <= z_roof_max]
 
     _progress('Fertig', 100)
-    roof_planes = [p for p in planes if abs(p.normal[2]) < 0.90]
+    roof_planes = [p for p in planes if abs(p.normal[2]) < normal_z_max]
     return {
         'edges': edges,
         'plane_count': len(planes),
