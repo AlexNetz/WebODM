@@ -30,13 +30,37 @@ def _load_ply(path):
 
 
 def _load_las(path):
-    """Read XYZ from LAS/LAZ file via laspy (requires lazrs backend for .laz)."""
+    """
+    Read XYZ from LAS/LAZ via laspy.
+    If LAZ decompression fails (no backend), convert to LAS via pdal CLI first.
+    """
     import laspy
-    las = laspy.read(path)
+    try:
+        las = laspy.read(path)
+    except Exception as e:
+        if 'LazBackend' in str(e) and path.lower().endswith('.laz'):
+            path = _laz_to_las_via_pdal(path)
+            las = laspy.read(path)
+        else:
+            raise
     x = np.array(las.x, dtype=np.float64)
     y = np.array(las.y, dtype=np.float64)
     z = np.array(las.z, dtype=np.float64)
     return np.column_stack([x, y, z]).astype(np.float32)
+
+
+def _laz_to_las_via_pdal(laz_path):
+    """Convert LAZ to uncompressed LAS using pdal CLI. Returns path to temp LAS file."""
+    import subprocess
+    import tempfile
+    import os
+    fd, las_tmp = tempfile.mkstemp(suffix='.las')
+    os.close(fd)
+    subprocess.run(
+        ['pdal', 'translate', laz_path, las_tmp],
+        check=True, capture_output=True
+    )
+    return las_tmp
 
 
 # ── Voxel downsampling ─────────────────────────────────────────────────────────
