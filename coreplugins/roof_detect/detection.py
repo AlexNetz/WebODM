@@ -255,23 +255,20 @@ def run_detection(laz_path, progress_callback=None):
     n_voxel = len(pts)
 
     _progress('Bodenpunkte entfernen…', 30)
-    # Multiple rounds of RANSAC ground removal
-    for _ in range(4):
-        n_before = len(pts)
-        pts = remove_ground(pts)
-        if len(pts) > n_before * 0.97:
-            break  # less than 3% removed — no dominant horizontal plane left
+    # Remove dominant ground plane first
+    pts = remove_ground(pts)
 
-    # Height filter: keep only points ≥ 2 m above the lowest remaining point.
-    # Removes residual ground while keeping walls and roof.
-    z_min = float(pts[:, 2].min())
-    pts = pts[pts[:, 2] > z_min + 2.0]
+    # Keep only the top 20% of points by elevation.
+    # For a house scan: ground fills 70-80% of scan area → top 20% ≈ walls + roof.
+    # This is robust against sloped terrain where a fixed +Nm offset fails.
+    z_cutoff = float(np.percentile(pts[:, 2], 80))
+    pts = pts[pts[:, 2] > z_cutoff]
     n_ground = len(pts)
 
     _progress('Dachebenen erkennen (RANSAC)…', 40)
     # Lenient parameters: low inlier ratio, more iterations, looser threshold
     planes = detect_planes(pts, n_planes=10, iterations=1000,
-                           threshold=0.30, min_inlier_ratio=0.01)
+                           threshold=0.15, min_inlier_ratio=0.01)
 
     _progress('Schnittlinien berechnen…', 80)
     edges = compute_edges(planes)
