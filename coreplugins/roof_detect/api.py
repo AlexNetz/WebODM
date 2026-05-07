@@ -50,11 +50,13 @@ def _run_detection_task(laz_path, project_id, task_id, plugin_dir, progress_call
         data={
             'edges': result['edges'],
             'plane_count': result['plane_count'],
+            'debug': result.get('debug', {}),
             'computed_at': datetime.now(timezone.utc).isoformat(),
         }
     )
 
-    return {'output': {'edges': result['edges'], 'plane_count': result['plane_count']}}
+    return {'output': {'edges': result['edges'], 'plane_count': result['plane_count'],
+                       'debug': result.get('debug', {})}}
 
 
 class DetectView(TaskView):
