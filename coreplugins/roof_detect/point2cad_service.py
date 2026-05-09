@@ -48,6 +48,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def _run(task_id, xyzc_path, out_path):
     os.makedirs(out_path, exist_ok=True)
+    env = {**os.environ, 'PYTHONPATH': '/work/point2cad'}
     result = subprocess.run(
         [
             sys.executable, '-m', 'point2cad.main',
@@ -57,6 +58,7 @@ def _run(task_id, xyzc_path, out_path):
         ],
         capture_output=True,
         cwd='/work/point2cad',
+        env=env,
     )
     success = result.returncode == 0
     error = result.stderr.decode(errors='replace')[-800:] if not success else None
