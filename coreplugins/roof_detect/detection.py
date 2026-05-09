@@ -357,6 +357,34 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
     _progress('Fertig', 100)
     roof_planes = [p for p in planes if abs(p.normal[2]) < normal_z_max]
 
+    # 1. Drop planes with very few points (wall fragments, vegetation artefacts).
+    if roof_planes:
+        max_pts = max(len(p.points) for p in roof_planes)
+        min_pts = max(50, int(max_pts * 0.01))
+        roof_planes = [p for p in roof_planes if len(p.points) >= min_pts]
+
+    # 2. Keep only the spatially connected component that contains the largest plane.
+    #    Two planes are "connected" if their XY bounding boxes are within max_gap of
+    #    each other — this handles L-shaped and multi-section roofs correctly.
+    if len(roof_planes) > 1:
+        n = len(roof_planes)
+        adj = [[False] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(i + 1, n):
+                gap = _bbox_gap_2d(roof_planes[i].points, roof_planes[j].points)
+                adj[i][j] = adj[j][i] = gap <= max_gap
+        start = max(range(n), key=lambda i: len(roof_planes[i].points))
+        visited = [False] * n
+        visited[start] = True
+        queue = [start]
+        while queue:
+            curr = queue.pop(0)
+            for nb in range(n):
+                if not visited[nb] and adj[curr][nb]:
+                    visited[nb] = True
+                    queue.append(nb)
+        roof_planes = [roof_planes[i] for i in range(n) if visited[i]]
+
     xyzc_stats = None
     if xyzc_out_path and roof_planes:
         xyzc_stats = export_xyzc(roof_planes, xyzc_out_path)
