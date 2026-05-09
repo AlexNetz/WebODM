@@ -28,6 +28,7 @@ services:
     volumes:
       - ./coreplugins/roof_detect/point2cad_service.py:/point2cad_service.py:ro
       - point2cad_data:/data
+      - ~/point2cad:/work/point2cad:ro
     environment:
       - P2CAD_PORT=8765
     restart: unless-stopped
