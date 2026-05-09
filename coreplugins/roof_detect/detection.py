@@ -21,7 +21,7 @@ def get_laz_z_offset(path):
         return float(f.header.offset[2])
 
 
-def load_pointcloud(path, decimation_step=100):
+def load_pointcloud(path, decimation_step=100, clip_bounds=None):
     """
     Load and spatially downsample a point cloud using pdal.
     pdal reads in streaming chunks — Python memory stays minimal regardless of file size.
@@ -36,15 +36,16 @@ def load_pointcloud(path, decimation_step=100):
     fd_las,  las_tmp  = tempfile.mkstemp(suffix='.las')
     os.close(fd_las)
 
-    pipeline = {
-        "pipeline": [
-            path,
-            # Truly streaming: no buffering, processes one point at a time.
-            # step=100 on 20M points → ~200k output, plenty for RANSAC.
-            {"type": "filters.decimation", "step": decimation_step},
-            las_tmp,
-        ]
-    }
+    steps = [path]
+    if clip_bounds is not None:
+        xmin, xmax, ymin, ymax = clip_bounds
+        steps.append({
+            "type": "filters.crop",
+            "bounds": f"([{xmin},{xmax}],[{ymin},{ymax}])",
+        })
+    steps.append({"type": "filters.decimation", "step": decimation_step})
+    steps.append(las_tmp)
+    pipeline = {"pipeline": steps}
 
     try:
         with open(json_tmp, 'w') as f:
@@ -313,13 +314,13 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                   threshold=0.15, min_inlier_ratio=0.01,
                   normal_z_max=0.9848, margin=1.0,
                   parallel_cos=0.97, max_gap=5.0,
-                  xyzc_out_path=None, progress_callback=None):
+                  xyzc_out_path=None, clip_bounds=None, progress_callback=None):
     def _progress(msg, pct):
         if progress_callback:
             progress_callback(msg, pct)
 
     _progress('Punktwolke laden (pdal)…', 5)
-    pts = load_pointcloud(laz_path, decimation_step=decimation_step)
+    pts = load_pointcloud(laz_path, decimation_step=decimation_step, clip_bounds=clip_bounds)
     n_loaded = len(pts)
 
     _progress('Downsampling…', 20)

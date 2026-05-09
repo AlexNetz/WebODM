@@ -21,7 +21,7 @@ SETTING_DEFAULTS = {
 
 # ── RANSAC detection task ──────────────────────────────────────────────────────
 
-def _run_detection_task(laz_path, project_id, task_id, plugin_dir, settings, progress_callback=None):
+def _run_detection_task(laz_path, project_id, task_id, plugin_dir, settings, clip_bounds=None, progress_callback=None):
     """
     Celery worker function: runs RANSAC detection and saves result to project_data.
     Must be self-contained (all imports inside) because run_function_async uses inspect.getsource().
@@ -51,7 +51,8 @@ def _run_detection_task(laz_path, project_id, task_id, plugin_dir, settings, pro
     os.makedirs(xyzc_dir, exist_ok=True)
     xyzc_path = os.path.join(xyzc_dir, 'input.xyzc')
 
-    result = run_detection(laz_path, **settings, xyzc_out_path=xyzc_path, progress_callback=_progress)
+    result = run_detection(laz_path, **settings, xyzc_out_path=xyzc_path,
+                           clip_bounds=clip_bounds, progress_callback=_progress)
 
     from coreplugins.project_data.models import ProjectEntry
 
@@ -147,7 +148,8 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
         raise TimeoutError('point2cad timed out after 40 minutes')
 
     if not st['success']:
-        raise RuntimeError(f"point2cad fehlgeschlagen:\n{st.get('error', 'unbekannter Fehler')}")
+        error_text = st.get('error') or 'unbekannter Fehler'
+        raise RuntimeError(f"point2cad fehlgeschlagen:\n{error_text}")
 
     _progress('Ergebnis speichern…', 92)
 
@@ -207,6 +209,7 @@ class DetectView(TaskView):
 
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
         settings = {k: request.data.get(k, v) for k, v in SETTING_DEFAULTS.items()}
+        clip_bounds = request.data.get('clip_bounds')  # [xmin,xmax,ymin,ymax] or None
 
         try:
             celery_result = run_function_async(
@@ -216,6 +219,7 @@ class DetectView(TaskView):
                 str(task.id),
                 plugin_dir,
                 settings,
+                clip_bounds,
                 with_progress=True,
             )
             return Response({'celery_task_id': celery_result.task_id}, status=status.HTTP_200_OK)

@@ -61,7 +61,7 @@ def _run(task_id, xyzc_path, out_path):
         env=env,
     )
     success = result.returncode == 0
-    error = result.stderr.decode(errors='replace')[-800:] if not success else None
+    error = result.stderr.decode(errors='replace') if not success else None
     jobs[task_id] = {'done': True, 'success': success, 'error': error}
     if not success:
         print(f'[point2cad] task {task_id} FAILED:\n{error}', flush=True)
