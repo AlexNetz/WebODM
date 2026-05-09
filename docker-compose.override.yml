@@ -31,6 +31,7 @@ services:
       - ~/point2cad:/work/point2cad:ro
     environment:
       - P2CAD_PORT=8765
+      - P2CAD_FORCE_CPU=1   # GTX 1050 has only 2 GiB VRAM — fall back to CPU
     restart: unless-stopped
     deploy:
       resources:

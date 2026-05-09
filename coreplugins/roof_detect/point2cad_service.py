@@ -56,6 +56,10 @@ def _run(task_id, xyzc_path, out_path):
         # from free fragments instead of triggering OOM.
         'PYTORCH_CUDA_ALLOC_CONF': 'max_split_size_mb:64',
     }
+    # Force CPU mode when GPU VRAM is too small (e.g. GTX 1050 with 2 GiB).
+    # Set P2CAD_FORCE_CPU=1 in docker-compose to enable; remove for GPU mode.
+    if os.environ.get('P2CAD_FORCE_CPU', '').lower() in ('1', 'true', 'yes'):
+        env['CUDA_VISIBLE_DEVICES'] = ''
     result = subprocess.run(
         [
             sys.executable, '-m', 'point2cad.main',
