@@ -285,7 +285,7 @@ def export_xyzc(planes, path):
 
 
 def make_preview_points(planes, step=15):
-    """Return downsampled coloured point cloud for frontend preview (one colour/plane)."""
+    """Return downsampled coloured point cloud normalised to [-1,1] for Three.js."""
     pts_list, ids_list = [], []
     for i, plane in enumerate(planes):
         pts = plane.points[::step]
@@ -293,11 +293,15 @@ def make_preview_points(planes, step=15):
         ids_list.append(np.full(len(pts), i, dtype=np.int32))
     if not pts_list:
         return {'positions': [], 'plane_ids': [], 'plane_count': 0}
-    pts_all = np.vstack(pts_list).astype(np.float32)
-    ids_all = np.concatenate(ids_list)
+    pts_all  = np.vstack(pts_list).astype(np.float64)
+    ids_all  = np.concatenate(ids_list)
+    centroid = pts_all.mean(axis=0)
+    pts_c    = pts_all - centroid
+    scale    = float(np.abs(pts_c).max()) or 1.0
+    pts_norm = (pts_c / scale).astype(np.float32)
     return {
-        'positions': pts_all.tolist(),
-        'plane_ids': ids_all.tolist(),
+        'positions':   pts_norm.tolist(),
+        'plane_ids':   ids_all.tolist(),
         'plane_count': len(planes),
     }
 
