@@ -15,3 +15,28 @@ services:
       - ./coreplugins/roof_detect:/webodm/coreplugins/roof_detect:ro
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
+      - point2cad_data:/data   # shared with point2cad service
+
+  # point2cad microservice — requires image to be available on the host:
+  #   docker load < point2cad.tar   or   docker pull <your-registry>/point2cad:latest
+  # Build locally first: cd ~/point2cad/point2cad/build && sh docker_build.sh
+  point2cad:
+    image: point2cad:latest
+    entrypoint: []
+    command: python /point2cad_service.py
+    volumes:
+      - ./coreplugins/roof_detect/point2cad_service.py:/point2cad_service.py:ro
+      - point2cad_data:/data
+    environment:
+      - P2CAD_PORT=8765
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  point2cad_data:

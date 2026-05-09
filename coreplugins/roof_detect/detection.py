@@ -267,13 +267,49 @@ def compute_edges(planes, normal_z_max=0.9848, margin=1.0, parallel_cos=0.97, ma
     return edges
 
 
+# ── point2cad helpers ─────────────────────────────────────────────────────────
+
+def export_xyzc(planes, path):
+    """Write RANSAC planes as .xyzc (point2cad input). Returns coordinate stats."""
+    import os
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    pts_all = np.vstack([p.points for p in planes])
+    ids_all = np.concatenate([np.full(len(p.points), i) for i, p in enumerate(planes)])
+    np.savetxt(path, np.column_stack([pts_all.astype(np.float64), ids_all]), fmt='%.6f %.6f %.6f %d')
+    return {
+        'centroid': pts_all.mean(axis=0).tolist(),
+        'scale': float((pts_all.max(0) - pts_all.min(0)).max()),
+        'n_planes': len(planes),
+        'n_points': int(len(pts_all)),
+    }
+
+
+def make_preview_points(planes, step=15):
+    """Return downsampled coloured point cloud for frontend preview (one colour/plane)."""
+    pts_list, ids_list = [], []
+    for i, plane in enumerate(planes):
+        pts = plane.points[::step]
+        pts_list.append(pts)
+        ids_list.append(np.full(len(pts), i, dtype=np.int32))
+    if not pts_list:
+        return {'positions': [], 'plane_ids': [], 'plane_count': 0}
+    pts_all = np.vstack(pts_list).astype(np.float32)
+    ids_all = np.concatenate(ids_list)
+    return {
+        'positions': pts_all.tolist(),
+        'plane_ids': ids_all.tolist(),
+        'plane_count': len(planes),
+    }
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                   height_percentile=40, n_planes=15, iterations=1000,
                   threshold=0.15, min_inlier_ratio=0.01,
                   normal_z_max=0.9848, margin=1.0,
-                  parallel_cos=0.97, max_gap=5.0, progress_callback=None):
+                  parallel_cos=0.97, max_gap=5.0,
+                  xyzc_out_path=None, progress_callback=None):
     def _progress(msg, pct):
         if progress_callback:
             progress_callback(msg, pct)
@@ -316,9 +352,18 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
 
     _progress('Fertig', 100)
     roof_planes = [p for p in planes if abs(p.normal[2]) < normal_z_max]
+
+    xyzc_stats = None
+    if xyzc_out_path and roof_planes:
+        xyzc_stats = export_xyzc(roof_planes, xyzc_out_path)
+
+    preview = make_preview_points(roof_planes)
+
     return {
         'edges': edges,
         'plane_count': len(planes),
+        'preview_points': preview,
+        'xyzc_stats': xyzc_stats,
         'debug': {
             'n_loaded':       n_loaded,
             'n_voxel':        n_voxel,

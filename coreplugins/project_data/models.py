@@ -14,6 +14,7 @@ class ProjectEntry(models.Model):
     WAYPOINT = 'waypoint'
     AREA_CUTOUT = 'area_cutout'
     ROOF_OUTLINE = 'roof_outline'
+    CAD_RESULT = 'cad_result'
 
     ENTRY_TYPES = [
         (ANNOTATION, 'Annotation'),
@@ -25,6 +26,7 @@ class ProjectEntry(models.Model):
         (WAYPOINT, 'Waypoint'),
         (AREA_CUTOUT, 'Area Cutout'),
         (ROOF_OUTLINE, 'Roof Outline'),
+        (CAD_RESULT, 'CAD Result'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
