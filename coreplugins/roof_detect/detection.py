@@ -322,6 +322,12 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
     _progress('Punktwolke laden (pdal)…', 5)
     pts = load_pointcloud(laz_path, decimation_step=decimation_step, clip_bounds=clip_bounds)
     n_loaded = len(pts)
+    if clip_bounds:
+        import logging
+        logging.getLogger(__name__).info(
+            f'[roof_detect] Clip bounds: {[round(v,1) for v in clip_bounds]}, '
+            f'points after crop+decimation: {n_loaded}'
+        )
 
     _progress('Downsampling…', 20)
     pts = voxel_downsample(pts, voxel=voxel_size)
