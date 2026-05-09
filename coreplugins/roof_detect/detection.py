@@ -142,14 +142,27 @@ def fit_plane_ransac(pts, iterations=1000, threshold=0.10, min_inlier_ratio=0.02
 
 # ── Ground removal ─────────────────────────────────────────────────────────────
 
-def remove_ground(pts, iterations=400, threshold=0.15, max_slope_cos=0.1):
-    """Remove the dominant near-horizontal plane (ground)."""
+def remove_ground(pts, iterations=400, threshold=0.15, max_slope_cos=0.95,
+                  max_z_fraction=0.20):
+    """Remove the dominant near-horizontal plane only if it lies in the lowest
+    portion of the Z range (actual ground, not a low-pitched roof).
+
+    max_slope_cos: only remove planes with |normal_z| >= this value (~18° from horizontal)
+    max_z_fraction: only remove if plane centroid is in the bottom X fraction of Z range
+    """
     result = fit_plane_ransac(pts, iterations=iterations, threshold=threshold)
     if result is None:
         return pts
     normal, _, mask = result
     if abs(normal[2]) < max_slope_cos:
-        return pts
+        return pts  # plane too steep to be ground
+    z_min, z_max = float(pts[:, 2].min()), float(pts[:, 2].max())
+    z_range = z_max - z_min
+    if z_range < 0.5:
+        return pts  # degenerate case
+    plane_z = float(pts[mask, 2].mean())
+    if (plane_z - z_min) / z_range > max_z_fraction:
+        return pts  # plane centroid too high — likely a flat roof, not ground
     return pts[~mask]
 
 
