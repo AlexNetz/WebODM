@@ -57,7 +57,7 @@ def _run(task_id, xyzc_path, out_path):
             '--max_parallel_surfaces', '1',
         ],
         capture_output=True,
-        cwd='/work/point2cad',
+        cwd=out_path,   # task-specific dir → each task gets its own tmp.obj
         env=env,
     )
     success = result.returncode == 0
