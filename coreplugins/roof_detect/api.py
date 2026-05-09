@@ -21,7 +21,7 @@ SETTING_DEFAULTS = {
 
 # ── RANSAC detection task ──────────────────────────────────────────────────────
 
-def _run_detection_task(laz_path, project_id, task_id, plugin_dir, settings, clip_bounds=None, progress_callback=None):
+def _run_detection_task(laz_path, project_id, task_id, plugin_dir, settings, progress_callback=None):
     """
     Celery worker function: runs RANSAC detection and saves result to project_data.
     Must be self-contained (all imports inside) because run_function_async uses inspect.getsource().
@@ -51,6 +51,7 @@ def _run_detection_task(laz_path, project_id, task_id, plugin_dir, settings, cli
     os.makedirs(xyzc_dir, exist_ok=True)
     xyzc_path = os.path.join(xyzc_dir, 'input.xyzc')
 
+    clip_bounds = settings.pop('clip_bounds', None)
     result = run_detection(laz_path, **settings, xyzc_out_path=xyzc_path,
                            clip_bounds=clip_bounds, progress_callback=_progress)
 
@@ -210,6 +211,8 @@ class DetectView(TaskView):
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
         settings = {k: request.data.get(k, v) for k, v in SETTING_DEFAULTS.items()}
         clip_bounds = request.data.get('clip_bounds')  # [xmin,xmax,ymin,ymax] or None
+        if clip_bounds:
+            settings['clip_bounds'] = clip_bounds  # piggyback on settings dict to avoid Celery signature issues
 
         try:
             celery_result = run_function_async(
@@ -219,7 +222,6 @@ class DetectView(TaskView):
                 str(task.id),
                 plugin_dir,
                 settings,
-                clip_bounds,
                 with_progress=True,
             )
             return Response({'celery_task_id': celery_result.task_id}, status=status.HTTP_200_OK)
