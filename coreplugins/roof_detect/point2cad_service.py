@@ -48,7 +48,14 @@ class Handler(BaseHTTPRequestHandler):
 
 def _run(task_id, xyzc_path, out_path):
     os.makedirs(out_path, exist_ok=True)
-    env = {**os.environ, 'PYTHONPATH': '/work/point2cad'}
+    env = {
+        **os.environ,
+        'PYTHONPATH': '/work/point2cad',
+        # Reduce CUDA allocator fragmentation on small GPUs (~2 GiB visible).
+        # Caps split-block size at 64 MB so small new requests can be served
+        # from free fragments instead of triggering OOM.
+        'PYTORCH_CUDA_ALLOC_CONF': 'max_split_size_mb:64',
+    }
     result = subprocess.run(
         [
             sys.executable, '-m', 'point2cad.main',

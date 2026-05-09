@@ -25,7 +25,10 @@ def load_pointcloud(path, decimation_step=100, clip_bounds=None):
     """
     Load and spatially downsample a point cloud using pdal.
     pdal reads in streaming chunks — Python memory stays minimal regardless of file size.
-    Returns float32 (N,3) array with CORRECTED Z coordinates (pdal strips header Z offset).
+    Returns float64 (N,3) array with CORRECTED Z coordinates (pdal strips header Z offset).
+
+    float64 is required: float32 quantises UTM-Y (~5.4 million) to 0.5 m steps,
+    which collapses wall points onto discrete Y slices and creates RANSAC sub-planes.
     """
     import json, subprocess, tempfile, os
 
@@ -67,7 +70,7 @@ def load_pointcloud(path, decimation_step=100, clip_bounds=None):
         # Re-apply the original offset so coordinates match Potree's measurement space.
         z_offset = get_laz_z_offset(path)
         z += z_offset
-        return np.column_stack([x, y, z]).astype(np.float32)
+        return np.column_stack([x, y, z])  # keep float64 — UTM precision matters
     finally:
         for tmp in [json_tmp, las_tmp]:
             try:
@@ -405,9 +408,14 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                     queue.append(nb)
         roof_planes = [roof_planes[i] for i in range(n) if visited[i]]
 
+    # For point2cad: only export sloped surfaces (exclude near-vertical walls).
+    # Walls (|normal_z| < 0.05, within ~3° of vertical) bloat the surface count
+    # and worsen GPU memory fragmentation in point2cad.
+    cad_planes = [p for p in roof_planes if abs(p.normal[2]) > 0.05]
+
     xyzc_stats = None
-    if xyzc_out_path and roof_planes:
-        xyzc_stats = export_xyzc(roof_planes, xyzc_out_path)
+    if xyzc_out_path and cad_planes:
+        xyzc_stats = export_xyzc(cad_planes, xyzc_out_path)
 
     preview = make_preview_points(roof_planes)
 
