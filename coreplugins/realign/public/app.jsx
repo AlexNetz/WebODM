@@ -64,7 +64,24 @@ class RealignPanel extends React.Component {
   }
 
   componentDidMount() {
-    this.loadStored();
+    const ctrl = this.props.controller;
+    const hydrate = () => {
+      if (!ctrl.lastData) return;
+      const data = ctrl.lastData;
+      const points = (data.points || []).map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+      while (points.length < 3) points.push(null);
+      this.setState({
+        entryId: ctrl.lastEntryId,
+        points: points.slice(0, 3),
+        resetZ: !!(data.options && data.options.reset_z_to_zero),
+        enabled: ctrl.applied,
+      });
+    };
+    if (ctrl.isLoaded()) {
+      hydrate();
+    } else {
+      ctrl.loadFromBackend(this.props.projectId, this.props.taskId, hydrate);
+    }
   }
 
   componentWillUnmount() {
@@ -84,30 +101,6 @@ class RealignPanel extends React.Component {
   };
 
   apiBase = () => `/api/plugins/project_data/project/${this.props.projectId}/entries/`;
-
-  loadStored = () => {
-    if (!this.props.projectId || !this.props.taskId) return;
-    $.ajax({
-      url: this.apiBase(),
-      data: { type: ENTRY_TYPE, task: this.props.taskId },
-      method: 'GET',
-    }).done((entries) => {
-      if (!Array.isArray(entries) || entries.length === 0) return;
-      const entry = entries[0];
-      const data = entry.data || {};
-      const points = (data.points || []).map((p) => new THREE.Vector3(p[0], p[1], p[2]));
-      while (points.length < 3) points.push(null);
-      this.setState({
-        entryId: entry.id,
-        points: points.slice(0, 3),
-        resetZ: !!(data.options && data.options.reset_z_to_zero),
-        enabled: !!data.enabled,
-      });
-      if (data.enabled && data.matrix && data.matrix.length === 16) {
-        this.props.controller.applyMatrix(data.matrix);
-      }
-    });
-  };
 
   removeMeasureSafely = (m) => {
     if (!m) return;
@@ -264,6 +257,8 @@ class RealignPanel extends React.Component {
     };
     this.setState({ busy: true });
     const onDone = (entry) => {
+      this.props.controller.lastData = entry.data || {};
+      this.props.controller.lastEntryId = entry.id;
       this.setState({ entryId: entry.id, busy: false });
       this.setMessage('Gespeichert.', 'success');
     };
@@ -315,6 +310,8 @@ class RealignPanel extends React.Component {
       url: this.apiBase() + this.state.entryId + '/',
       method: 'DELETE',
     }).always(() => {
+      this.props.controller.lastData = null;
+      this.props.controller.lastEntryId = null;
       this.setState({
         points: [null, null, null],
         resetZ: false,
@@ -465,7 +462,7 @@ class RealignButton extends React.Component {
   }
 
   componentDidMount() {
-    this.props.controller.autoLoad();
+    this.props.controller.loadFromBackend(this.props.projectId, this.props.taskId);
   }
 
   toggleOpen = () => this.setState({ open: !this.state.open });
@@ -500,7 +497,57 @@ class RealignController {
     this.applied = false;
     this.meshWatcher = null;
     this.knownMeshes = new WeakSet();
+    this.lastData = null;
+    this.lastEntryId = null;
+    this.projectId = null;
+    this.taskId = null;
+    this._loadCallbacks = [];
+    this._loaded = false;
   }
+
+  apiBase() {
+    return '/api/plugins/project_data/project/' + this.projectId + '/entries/';
+  }
+
+  loadFromBackend(projectId, taskId, callback) {
+    this.projectId = projectId;
+    this.taskId = taskId;
+    if (callback) this._loadCallbacks.push(callback);
+    if (!projectId || !taskId) {
+      this._loaded = true;
+      this._fireCallbacks();
+      return;
+    }
+    $.ajax({
+      url: this.apiBase(),
+      data: { type: 'alignment_transform', task: taskId },
+      method: 'GET',
+    }).done((entries) => {
+      if (Array.isArray(entries) && entries.length > 0) {
+        const entry = entries[0];
+        this.lastData = entry.data || {};
+        this.lastEntryId = entry.id;
+        if (this.lastData.enabled &&
+            Array.isArray(this.lastData.matrix) &&
+            this.lastData.matrix.length === 16) {
+          this.applyMatrix(this.lastData.matrix);
+        }
+      }
+      this._loaded = true;
+      this._fireCallbacks();
+    }).fail(() => {
+      this._loaded = true;
+      this._fireCallbacks();
+    });
+  }
+
+  _fireCallbacks() {
+    const cbs = this._loadCallbacks;
+    this._loadCallbacks = [];
+    cbs.forEach((cb) => { try { cb(); } catch (e) {} });
+  }
+
+  isLoaded() { return this._loaded; }
 
   _captureOriginal(obj) {
     if (!obj._realignOriginalMatrix) {
@@ -598,7 +645,6 @@ class RealignController {
     }
   }
 
-  autoLoad() {}
 }
 
 export default class App {
