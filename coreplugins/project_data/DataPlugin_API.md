@@ -569,6 +569,96 @@ function attachmentSrcUrl(url: string, token: string): string {
 
 ---
 
+### Realignment-Matrix in einem externen 3D-Viewer (Roof-S) anwenden
+
+Das WebODM-Plugin `realign` transformiert Punktwolke und Mesh nur im WebODM-eigenen
+Potree-Viewer — die Files auf dem Server bleiben unverändert. Externe Viewer (z. B.
+Roof-S) müssen die Matrix selbst laden und anwenden, sonst zeigen sie weiterhin
+das gekippte Originalmodell.
+
+**Loader:** Holt den (höchstens einen) Eintrag pro Task. Gibt `null` zurück, wenn
+keine Korrektur existiert oder sie deaktiviert ist.
+
+```typescript
+import * as THREE from 'three';
+
+export async function loadAlignmentMatrix(
+  projectId: number,
+  taskId: string,
+  token: string
+): Promise<THREE.Matrix4 | null> {
+  const entries = await DataPluginApi.listEntries(
+    projectId, token, 'alignment_transform', taskId
+  );
+  const entry = entries[0];
+  if (!entry) return null;
+  const data = entry.data as AlignmentTransformData;
+  if (!data.enabled || !Array.isArray(data.matrix) || data.matrix.length !== 16) {
+    return null;
+  }
+  return new THREE.Matrix4().fromArray(data.matrix);
+}
+```
+
+**Apply-Helper:** Wendet die Matrix auf eine bereits geladene Punktwolke und/oder
+ein Mesh an. Sichert die Original-Matrix in `_realignOriginalMatrix`, sodass ein
+Toggle / Reset rückgängig gemacht werden kann.
+
+```typescript
+export function applyAlignment(
+  obj: THREE.Object3D | null | undefined,
+  M: THREE.Matrix4
+): void {
+  if (!obj) return;
+  const o = obj as THREE.Object3D & {
+    _realignOriginalMatrix?: THREE.Matrix4;
+    _realignOriginalAuto?: boolean;
+  };
+  if (!o._realignOriginalMatrix) {
+    o._realignOriginalMatrix = obj.matrix.clone();
+    o._realignOriginalAuto = obj.matrixAutoUpdate;
+  }
+  obj.matrixAutoUpdate = false;
+  obj.matrix.copy(o._realignOriginalMatrix).premultiply(M);
+  obj.updateMatrixWorld(true);
+}
+
+export function revertAlignment(obj: THREE.Object3D | null | undefined): void {
+  if (!obj) return;
+  const o = obj as THREE.Object3D & {
+    _realignOriginalMatrix?: THREE.Matrix4;
+    _realignOriginalAuto?: boolean;
+  };
+  if (!o._realignOriginalMatrix) return;
+  obj.matrix.copy(o._realignOriginalMatrix);
+  obj.matrixAutoUpdate = o._realignOriginalAuto !== false;
+  obj.updateMatrixWorld(true);
+}
+```
+
+**Verwendung beim Task-Load:**
+
+```typescript
+const M = await loadAlignmentMatrix(projectId, taskId, token);
+if (M) {
+  applyAlignment(pointcloudObject, M);   // z. B. Potree-Pointcloud
+  applyAlignment(meshObject, M);         // z. B. GLB-Mesh aus GLTFLoader
+}
+```
+
+**Höhenmessungen:** Solange Roof-S Höhen aus den transformierten Welt-Koordinaten
+des Three.js-Objekts berechnet, stimmen sie automatisch — die Matrix beeinflusst
+`object.matrixWorld`, und alle Picking-/Raycast-Ergebnisse liegen damit im
+korrigierten Koordinatensystem.
+
+**Edge Case Re-Erfassen:** Wenn der Roof-S-User selbst neue Punkte für eine
+Realignment auswählt (statt nur die WebODM-Korrektur zu konsumieren), gilt
+dasselbe wie im WebODM-Plugin: vorher `revertAlignment()` aufrufen, sonst werden
+die Picks im *bereits korrigierten* Koordinatensystem aufgenommen und die zweite
+Matrix multipliziert sich auf die erste.
+
+---
+
 ## 6. Fehlerbehandlung
 
 | HTTP-Status | Bedeutung |

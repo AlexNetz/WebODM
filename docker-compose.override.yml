@@ -7,7 +7,7 @@ services:
     volumes:
       - ./coreplugins/project_data:/webodm/coreplugins/project_data:ro
       - ./coreplugins/roof_detect:/webodm/coreplugins/roof_detect:ro
-      - ./coreplugins/realign:/webodm/coreplugins/realign:ro
+      - ./coreplugins/realign:/webodm/coreplugins/realign
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
   worker:
@@ -15,7 +15,7 @@ services:
     volumes:
       - ./coreplugins/project_data:/webodm/coreplugins/project_data:ro
       - ./coreplugins/roof_detect:/webodm/coreplugins/roof_detect:ro
-      - ./coreplugins/realign:/webodm/coreplugins/realign:ro
+      - ./coreplugins/realign:/webodm/coreplugins/realign
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
       - point2cad_data:/data   # shared with point2cad service
