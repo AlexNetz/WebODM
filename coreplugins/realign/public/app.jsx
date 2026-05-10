@@ -596,19 +596,34 @@ class RealignController {
   }
 
   _collectTargets() {
-    // Transformiere die zwei Top-Level-Scenes als Ganzes statt einzelne Children:
-    // - scenePointCloud: enthält Pointcloud(s) + interne referenceFrame + Lichter
-    // - scene: enthält texturiertes Mesh + Camera-Marker + Lichter
-    // Mess-Marker liegen in MeasuringTool.scene (separate Scene) und sind damit
-    // NICHT betroffen — die behalten ihre absolute Welt-Position.
-    // Vorteil: nachträglich geladene Objekte (z.B. Mesh beim Toggle Struktur-Modell)
-    // erben die Transformation der Parent-Scene automatisch — kein Watcher nötig.
+    // Wir iterieren Children einzeln statt die Top-Level-Scenes als Ganzes zu
+    // transformieren — Three.js-`Scene`-Objects in Potree's Setup zeigen sonst
+    // gar nicht mehr (Renderer scheint sie als Identity zu erwarten).
+    //
+    // - scenePointCloud.children: PointCloudOctree(s) + referenceFrame + Lichter
+    //   → nur PointCloudOctree erkennen (pcoGeometry-Property), referenceFrame
+    //     hat matrixAutoUpdate=false und ist Potree-internes Coord-System.
+    // - scene.children: texturiertes Mesh + Camera-Marker + Lichter
+    //   → alles außer Lichtern transformieren (Camera-Marker mit-rotieren ist OK,
+    //     sie repräsentieren Drohnen-Positionen und sollen mit dem Modell drehen).
     const targets = [];
     const s = this.viewer && this.viewer.scene;
     if (!s) return targets;
-    if (s.scenePointCloud) targets.push(s.scenePointCloud);
-    if (s.scene) targets.push(s.scene);
+    if (s.scenePointCloud && Array.isArray(s.scenePointCloud.children)) {
+      s.scenePointCloud.children.forEach((obj) => {
+        if (this._isPointCloud(obj)) targets.push(obj);
+      });
+    }
+    if (s.scene && Array.isArray(s.scene.children)) {
+      s.scene.children.forEach((obj) => {
+        if (!this._isLight(obj)) targets.push(obj);
+      });
+    }
     return targets;
+  }
+
+  _isPointCloud(obj) {
+    return obj && obj.pcoGeometry !== undefined;
   }
 
   _isLight(obj) {
@@ -624,12 +639,41 @@ class RealignController {
     const M = new THREE.Matrix4().fromArray(matrixArray);
     this.currentMatrix = M;
     this.applied = true;
-    this._collectTargets().forEach((obj) => this._applyToObject(obj, M));
+    this._collectTargets().forEach((obj) => {
+      this.knownTargets && this.knownTargets.add(obj);
+      this._applyToObject(obj, M);
+    });
+    this._startWatcher();
   }
 
   revertMatrix() {
     this.applied = false;
-    this._collectTargets().forEach((obj) => this._revertObject(obj));
+    this._stopWatcher();
+    // Auch alle zwischenzeitlich vom Watcher captured Objekte zurücksetzen,
+    // damit Mesh + Pointcloud wieder auf Original-Position landen.
+    const all = this._collectTargets();
+    all.forEach((obj) => this._revertObject(obj));
+  }
+
+  _startWatcher() {
+    if (this.watcher) return;
+    if (!this.knownTargets) this.knownTargets = new WeakSet();
+    this._collectTargets().forEach((t) => this.knownTargets.add(t));
+    this.watcher = setInterval(() => {
+      if (!this.applied || !this.currentMatrix) return;
+      this._collectTargets().forEach((obj) => {
+        if (this.knownTargets.has(obj)) return;
+        this.knownTargets.add(obj);
+        this._applyToObject(obj, this.currentMatrix);
+      });
+    }, 1000);
+  }
+
+  _stopWatcher() {
+    if (this.watcher) {
+      clearInterval(this.watcher);
+      this.watcher = null;
+    }
   }
 }
 
