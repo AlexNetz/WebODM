@@ -596,21 +596,18 @@ class RealignController {
   }
 
   _collectTargets() {
+    // Transformiere die zwei Top-Level-Scenes als Ganzes statt einzelne Children:
+    // - scenePointCloud: enthält Pointcloud(s) + interne referenceFrame + Lichter
+    // - scene: enthält texturiertes Mesh + Camera-Marker + Lichter
+    // Mess-Marker liegen in MeasuringTool.scene (separate Scene) und sind damit
+    // NICHT betroffen — die behalten ihre absolute Welt-Position.
+    // Vorteil: nachträglich geladene Objekte (z.B. Mesh beim Toggle Struktur-Modell)
+    // erben die Transformation der Parent-Scene automatisch — kein Watcher nötig.
     const targets = [];
     const s = this.viewer && this.viewer.scene;
     if (!s) return targets;
-    // Pointclouds liegen in viewer.scene.scenePointCloud (Schreibweise korrekt: PointCloud, nicht Pointclouds!)
-    if (s.scenePointCloud && Array.isArray(s.scenePointCloud.children)) {
-      s.scenePointCloud.children.forEach((obj) => {
-        if (!this._isLight(obj)) targets.push(obj);
-      });
-    }
-    // Mesh + Camera-Markers liegen in viewer.scene.scene
-    if (s.scene && Array.isArray(s.scene.children)) {
-      s.scene.children.forEach((obj) => {
-        if (!this._isLight(obj)) targets.push(obj);
-      });
-    }
+    if (s.scenePointCloud) targets.push(s.scenePointCloud);
+    if (s.scene) targets.push(s.scene);
     return targets;
   }
 
@@ -628,47 +625,12 @@ class RealignController {
     this.currentMatrix = M;
     this.applied = true;
     this._collectTargets().forEach((obj) => this._applyToObject(obj, M));
-    this._startMeshWatcher();
   }
 
   revertMatrix() {
     this.applied = false;
-    this._stopMeshWatcher();
     this._collectTargets().forEach((obj) => this._revertObject(obj));
   }
-
-  _startMeshWatcher() {
-    if (this.meshWatcher) return;
-    // Anfänglich bekannte Targets als "schon verarbeitet" markieren
-    this._collectTargets().forEach((t) => this.knownMeshes.add(t));
-    this.meshWatcher = setInterval(() => {
-      if (!this.applied || !this.currentMatrix) return;
-      const s = this.viewer && this.viewer.scene;
-      if (!s) return;
-      const scan = (root) => {
-        if (!root || !Array.isArray(root.children)) return;
-        root.children.forEach((obj) => {
-          if (this.knownMeshes.has(obj)) return;
-          if (this._isLight(obj)) {
-            this.knownMeshes.add(obj);
-            return;
-          }
-          this.knownMeshes.add(obj);
-          this._applyToObject(obj, this.currentMatrix);
-        });
-      };
-      scan(s.scenePointCloud);
-      scan(s.scene);
-    }, 1000);
-  }
-
-  _stopMeshWatcher() {
-    if (this.meshWatcher) {
-      clearInterval(this.meshWatcher);
-      this.meshWatcher = null;
-    }
-  }
-
 }
 
 export default class App {
