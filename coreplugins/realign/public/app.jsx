@@ -82,7 +82,7 @@ class RealignPanel extends React.Component {
         entryId: ctrl.lastEntryId,
         points: points.slice(0, 3),
         resetZ: !!(data.options && data.options.reset_z_to_zero),
-        enabled: ctrl.applied,
+        enabled: ctrl.applied,  // wird derzeit immer false sein, da Auto-Apply aus
       });
     };
     if (ctrl.isLoaded()) {
@@ -535,11 +535,9 @@ class RealignController {
         const entry = entries[0];
         this.lastData = entry.data || {};
         this.lastEntryId = entry.id;
-        if (this.lastData.enabled &&
-            Array.isArray(this.lastData.matrix) &&
-            this.lastData.matrix.length === 16) {
-          this._scheduleAutoApply(this.lastData.matrix);
-        }
+        // Auto-Apply ist temporär deaktiviert — Potrees Init-Sequence
+        // (loadProject, pointcloud_added, internal pos-resets) kollidiert
+        // mit unserem applyMatrix. Der User muss manuell "Aktiv" klicken.
       }
       this._loaded = true;
       this._fireCallbacks();
