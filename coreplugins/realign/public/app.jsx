@@ -130,6 +130,10 @@ class RealignPanel extends React.Component {
     }
 
     const viewer = this.props.viewer;
+    // maxMarkers=2: Potree fügt einen schwebenden Vorschau-Marker hinzu (der mit der
+    // Maus mitwandert) und beim ersten Klick einen "fixierten" Marker. length geht
+    // dann von 1 auf 2 — daran erkennen wir den Klick. Den Vorschau-Marker entfernen
+    // wir nach dem Klick selbst.
     const measure = viewer.measuringTool.startInsertion({
       showDistances: false,
       showAngles: false,
@@ -137,7 +141,7 @@ class RealignPanel extends React.Component {
       showArea: false,
       showHeight: false,
       closed: false,
-      maxMarkers: 1,
+      maxMarkers: 2,
       name: 'Realign-Punkt ' + (index + 1),
     });
     this.activeMeasure = measure;
@@ -147,13 +151,18 @@ class RealignPanel extends React.Component {
     const finalize = () => {
       if (finalized) return;
       const m = measure;
-      if (!m || !m.points || m.points.length < 1) return;
+      if (!m || !m.points || m.points.length < 2) return;
+      // points[0] ist der gepickte Punkt, points[1] der hängengebliebene Vorschau-Marker
       const marker = m.points[0];
-      const pos = (marker.position && typeof marker.position.clone === 'function')
+      const pos = (marker && marker.position && typeof marker.position.clone === 'function')
         ? marker.position.clone()
-        : (marker.clone ? marker.clone() : null);
-      if (!pos) return;
+        : null;
+      if (!pos || (pos.x === 0 && pos.y === 0 && pos.z === 0)) return;
       finalized = true;
+      // Vorschau-Marker abräumen, damit nur der gepickte Punkt sichtbar bleibt
+      try {
+        while (m.points.length > 1) m.removeMarker(m.points.length - 1);
+      } catch (e) {}
       this.persistentMeasures[index] = m;
       this.activeMeasure = null;
       if (this._pollTimer) {
@@ -173,7 +182,7 @@ class RealignPanel extends React.Component {
         }
         return;
       }
-      if (measure.points && measure.points.length >= 1) {
+      if (measure.points && measure.points.length >= 2) {
         finalize();
       }
     }, 150);
