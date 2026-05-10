@@ -585,43 +585,64 @@ class RealignController {
 
   isLoaded() { return this._loaded; }
 
-  _applyToObject(obj, M) {
-    // Wrapper-Strategie: Wir packen das Object in eine THREE.Group und transformieren
-    // die Group statt das Object direkt. Potree manipuliert intern pointcloud.position
-    // (z.B. via geometry.offset im Constructor), was unsere direkten Pos-Setzungen
-    // überschreibt. Three.js' Scene-Graph kombiniert wrapper.matrix * obj.matrix
-    // automatisch, sodass die Welt-Position der Pointcloud-Punkte korrekt rotiert
-    // wird, ohne dass wir am Object selbst etwas ändern müssen.
-    const THREE = getTHREE();
-    if (!obj._realignWrapper) {
-      const wrapper = new THREE.Group();
-      wrapper.name = 'realign_wrapper';
-      wrapper.frustumCulled = false;
-      const oldParent = obj.parent;
-      if (oldParent) {
-        const idx = oldParent.children.indexOf(obj);
-        oldParent.remove(obj);
-        oldParent.add(wrapper);
-        wrapper.add(obj);
-      }
-      obj._realignWrapper = wrapper;
-      wrapper._realignChild = obj;
+  _captureOriginal(obj) {
+    if (!obj._realignOriginalCaptured) {
+      obj._realignOriginalMatrix = obj.matrix.clone();
+      obj._realignOriginalAutoUpdate = obj.matrixAutoUpdate;
+      obj._realignOriginalFrustumCulled = obj.frustumCulled;
+      obj._realignOriginalCaptured = true;
     }
-    const wrapper = obj._realignWrapper;
-    M.decompose(wrapper.position, wrapper.quaternion, wrapper.scale);
-    wrapper.matrixWorldNeedsUpdate = true;
+  }
+
+  _applyToObject(obj, M) {
+    this._captureOriginal(obj);
+    const THREE = getTHREE();
+    // newMatrix = M · originalMatrix
+    const newM = new THREE.Matrix4().copy(M).multiply(obj._realignOriginalMatrix);
+    obj._realignTargetMatrix = newM;
+    obj.frustumCulled = false;
+    obj.matrixAutoUpdate = false;
+    obj.matrix.copy(newM);
+    obj.updateMatrixWorld(true);
   }
 
   _revertObject(obj) {
-    const wrapper = obj._realignWrapper;
-    if (!wrapper) return;
-    const parent = wrapper.parent;
-    wrapper.remove(obj);
-    if (parent) {
-      parent.remove(wrapper);
-      parent.add(obj);
+    if (obj._realignOriginalCaptured) {
+      obj._realignTargetMatrix = null;
+      obj.matrix.copy(obj._realignOriginalMatrix);
+      obj.matrixAutoUpdate = obj._realignOriginalAutoUpdate;
+      obj.frustumCulled = obj._realignOriginalFrustumCulled;
+      obj.updateMatrixWorld(true);
     }
-    obj._realignWrapper = null;
+  }
+
+  _installFrameHook() {
+    if (this._frameHookInstalled) return;
+    this._frameHookInstalled = true;
+    // Bei jedem Render-Frame zwingen wir matrix auf unsere Ziel-Matrix zurück.
+    // Potree setzt zwischendurch position/quaternion, was bei matrixAutoUpdate=false
+    // zwar matrix nicht überschreiben sollte — aber updateMatrix wird intern oft
+    // gerufen. Mit dem update-Hook sind wir robust.
+    this._updateListener = () => {
+      if (!this.applied) return;
+      this._collectTargets().forEach((obj) => {
+        if (obj._realignTargetMatrix) {
+          obj.matrix.copy(obj._realignTargetMatrix);
+          obj.matrixAutoUpdate = false;
+          obj.matrixWorldNeedsUpdate = true;
+        }
+      });
+    };
+    try { this.viewer.addEventListener('update', this._updateListener); }
+    catch (e) {}
+  }
+
+  _uninstallFrameHook() {
+    if (!this._frameHookInstalled) return;
+    try { this.viewer.removeEventListener('update', this._updateListener); }
+    catch (e) {}
+    this._frameHookInstalled = false;
+    this._updateListener = null;
   }
 
   _collectTargets() {
@@ -646,7 +667,6 @@ class RealignController {
     if (s.scene && Array.isArray(s.scene.children)) {
       s.scene.children.forEach((obj) => {
         if (this._isLight(obj)) return;
-        if (obj._realignChild) return; // bereits ein Wrapper von uns
         targets.push(obj);
       });
     }
@@ -670,18 +690,22 @@ class RealignController {
     const M = new THREE.Matrix4().fromArray(matrixArray);
     this.currentMatrix = M;
     this.applied = true;
+    if (!this.knownTargets) this.knownTargets = new WeakSet();
     this._collectTargets().forEach((obj) => {
-      this.knownTargets && this.knownTargets.add(obj);
+      this.knownTargets.add(obj);
       this._applyToObject(obj, M);
     });
+    this._installFrameHook();
     this._startWatcher();
   }
 
   revertMatrix() {
     this.applied = false;
+    this._uninstallFrameHook();
     this._stopWatcher();
-    // Auch alle zwischenzeitlich vom Watcher captured Objekte zurücksetzen,
-    // damit Mesh + Pointcloud wieder auf Original-Position landen.
+    // Captured Targets sind auf der Pointcloud / Mesh markiert. Iterieren wir
+    // auch über bekannte Targets aus dem WeakSet kann nicht — also alles
+    // sammeln, was potentiell betroffen ist.
     const all = this._collectTargets();
     all.forEach((obj) => this._revertObject(obj));
   }
