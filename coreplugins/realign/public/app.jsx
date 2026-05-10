@@ -538,7 +538,7 @@ class RealignController {
         if (this.lastData.enabled &&
             Array.isArray(this.lastData.matrix) &&
             this.lastData.matrix.length === 16) {
-          this.applyMatrix(this.lastData.matrix);
+          this._scheduleAutoApply(this.lastData.matrix);
         }
       }
       this._loaded = true;
@@ -547,6 +547,34 @@ class RealignController {
       this._loaded = true;
       this._fireCallbacks();
     });
+  }
+
+  _scheduleAutoApply(matrix) {
+    // Auto-Apply muss warten bis:
+    // (a) Die Pointcloud zur scenePointCloud hinzugefügt wurde, UND
+    // (b) Potree's loadProject() gelaufen ist (setzt pointcloud.position aus
+    //     gespeicherter potree_scene). loadProject läuft in einem `update`-Hook
+    //     einmalig, daher 1.5 s Buffer nach pointcloud_added.
+    // Sonst capturt _captureOriginal eine Zwischen-Position als "Original" und
+    // die Pointcloud bleibt unsichtbar an der falschen Stelle.
+    const apply = () => {
+      setTimeout(() => {
+        if (!this.applied) this.applyMatrix(matrix);
+      }, 1500);
+    };
+    const scene = this.viewer && this.viewer.scene;
+    if (!scene) { apply(); return; }
+    const hasPC = scene.pointclouds && scene.pointclouds.length > 0;
+    if (hasPC) {
+      apply();
+      return;
+    }
+    const onAdded = () => {
+      try { scene.removeEventListener('pointcloud_added', onAdded); } catch (e) {}
+      apply();
+    };
+    try { scene.addEventListener('pointcloud_added', onAdded); }
+    catch (e) { setTimeout(apply, 3000); }
   }
 
   _fireCallbacks() {
