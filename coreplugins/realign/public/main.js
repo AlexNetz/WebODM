@@ -8,43 +8,46 @@
 (function () {
   var App = null;
   var pendingLoaders = [];
-  var modPromise = SystemJS.import('realign/build/app.js').then(function (m) {
+
+  SystemJS.import('realign/build/app.js').then(function (m) {
     App = (m && m.default) || null;
-    // Bestehende Lazy-Loader benachrichtigen
     pendingLoaders.forEach(function (l) { l.notify(); });
     pendingLoaders.length = 0;
-    return App;
   }).catch(function (e) {
     console.error('[realign] Module load failed:', e);
   });
 
-  function RealignLazyLoader(props) {
-    React.Component.call(this, props);
-    this.state = { ready: !!App };
-    this._mounted = false;
-    this._notify = this._notify.bind(this);
+  class RealignLazyLoader extends React.Component {
+    constructor(props) {
+      super(props);
+      this.state = { ready: !!App };
+      this._mounted = false;
+      this._notify = this._notify.bind(this);
+    }
+
+    componentDidMount() {
+      this._mounted = true;
+      if (!this.state.ready) {
+        pendingLoaders.push({ notify: this._notify });
+      }
+    }
+
+    componentWillUnmount() {
+      this._mounted = false;
+    }
+
+    _notify() {
+      if (this._mounted) this.setState({ ready: true });
+    }
+
+    render() {
+      if (!this.state.ready || !App) return null;
+      if (!this._appInstance) {
+        this._appInstance = new App(this.props.viewer);
+      }
+      return this._appInstance.render();
+    }
   }
-  RealignLazyLoader.prototype = Object.create(React.Component.prototype);
-  RealignLazyLoader.prototype.constructor = RealignLazyLoader;
-  RealignLazyLoader.prototype.componentDidMount = function () {
-    this._mounted = true;
-    if (!this.state.ready) {
-      pendingLoaders.push({ notify: this._notify });
-    }
-  };
-  RealignLazyLoader.prototype.componentWillUnmount = function () {
-    this._mounted = false;
-  };
-  RealignLazyLoader.prototype._notify = function () {
-    if (this._mounted) this.setState({ ready: true });
-  };
-  RealignLazyLoader.prototype.render = function () {
-    if (!this.state.ready || !App) return null;
-    if (!this._appInstance) {
-      this._appInstance = new App(this.props.viewer);
-    }
-    return this._appInstance.render();
-  };
 
   PluginsAPI.ModelView.addActionButton(function (options) {
     if (App) {
