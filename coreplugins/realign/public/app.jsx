@@ -597,14 +597,33 @@ class RealignController {
   _applyToObject(obj, M) {
     this._captureOriginal(obj);
     const THREE = getTHREE();
-    // newMatrix = M · originalMatrix(pos, quat, scale)
     const originalM = new THREE.Matrix4().compose(
       obj._realignOriginalPos,
       obj._realignOriginalQuat,
       obj._realignOriginalScale
     );
     const newM = new THREE.Matrix4().copy(M).multiply(originalM);
-    newM.decompose(obj.position, obj.quaternion, obj.scale);
+    const tgtPos = new THREE.Vector3();
+    const tgtQuat = new THREE.Quaternion();
+    const tgtScale = new THREE.Vector3();
+    newM.decompose(tgtPos, tgtQuat, tgtScale);
+    obj._realignTargetPos = tgtPos;
+    obj._realignTargetQuat = tgtQuat;
+    obj._realignTargetScale = tgtScale;
+    // Verhindere Frustum-Culling, falls die transformierte boundingBox nicht
+    // mehr mit der Camera-Sicht overlapped.
+    if (obj._realignOriginalFrustumCulled === undefined) {
+      obj._realignOriginalFrustumCulled = obj.frustumCulled;
+    }
+    obj.frustumCulled = false;
+    this._forcePose(obj);
+  }
+
+  _forcePose(obj) {
+    if (!obj._realignTargetPos) return;
+    obj.position.copy(obj._realignTargetPos);
+    obj.quaternion.copy(obj._realignTargetQuat);
+    obj.scale.copy(obj._realignTargetScale);
     if (obj.matrixAutoUpdate === false && typeof obj.updateMatrix === 'function') {
       obj.updateMatrix();
     }
@@ -613,9 +632,15 @@ class RealignController {
 
   _revertObject(obj) {
     if (obj._realignOriginalCaptured) {
+      obj._realignTargetPos = null;
+      obj._realignTargetQuat = null;
+      obj._realignTargetScale = null;
       obj.position.copy(obj._realignOriginalPos);
       obj.quaternion.copy(obj._realignOriginalQuat);
       obj.scale.copy(obj._realignOriginalScale);
+      if (obj._realignOriginalFrustumCulled !== undefined) {
+        obj.frustumCulled = obj._realignOriginalFrustumCulled;
+      }
       if (obj.matrixAutoUpdate === false && typeof obj.updateMatrix === 'function') {
         obj.updateMatrix();
       }
@@ -687,14 +712,23 @@ class RealignController {
     if (this.watcher) return;
     if (!this.knownTargets) this.knownTargets = new WeakSet();
     this._collectTargets().forEach((t) => this.knownTargets.add(t));
+    // Zwei Aufgaben pro Tick:
+    // 1. Neue Targets (z.B. nachgeladenes Mesh) erfassen + transformieren
+    // 2. Bestehende Targets gegen Resets durch Potree absichern (_forcePose)
+    //    Potree manipuliert pointcloud.position für interne Updates und löscht
+    //    dabei unsere Translation. Wir erzwingen sie alle 250 ms neu.
     this.watcher = setInterval(() => {
       if (!this.applied || !this.currentMatrix) return;
-      this._collectTargets().forEach((obj) => {
-        if (this.knownTargets.has(obj)) return;
-        this.knownTargets.add(obj);
-        this._applyToObject(obj, this.currentMatrix);
+      const targets = this._collectTargets();
+      targets.forEach((obj) => {
+        if (!this.knownTargets.has(obj)) {
+          this.knownTargets.add(obj);
+          this._applyToObject(obj, this.currentMatrix);
+          return;
+        }
+        this._forcePose(obj);
       });
-    }, 5000);
+    }, 250);
   }
 
   _stopWatcher() {
