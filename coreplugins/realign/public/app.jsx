@@ -1,6 +1,11 @@
 import React from 'react';
-import * as THREE from 'THREE';
 import $ from 'jquery';
+
+// THREE is provided as a global by WebODM's main bundle (see webpack.config.js
+// externals: { "THREE": "THREE" }). The plugin-build webpack.config.js.tmpl
+// does not list THREE as external, so we cannot `import * as THREE from 'THREE'`
+// here without bundling another copy. Read the global directly instead.
+const THREE = window.THREE;
 
 const ENTRY_TYPE = 'alignment_transform';
 
