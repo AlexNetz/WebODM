@@ -1,0 +1,13 @@
+{
+  "name": "Realign",
+  "webodmMinVersion": "2.5.0",
+  "description": "Re-align point cloud and 3D mesh in the viewer using a 3-point horizontal-plane reference. Stores the 4x4 transform via the project_data plugin and applies it automatically when the viewer is opened.",
+  "version": "1.0.0",
+  "author": "alex_netz",
+  "email": "alex@stonelove-klettergriffe.de",
+  "repository": "",
+  "tags": ["3d", "viewer", "alignment", "measurement"],
+  "homepage": "",
+  "experimental": false,
+  "deprecated": false
+}

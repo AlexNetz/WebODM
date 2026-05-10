@@ -78,6 +78,7 @@ Der Token wird via `POST /api/token-auth/` bezogen und in `localStorage` als `ri
 | `keyvalue` | Beliebige Schlüssel-Wert-Paare | `{ key1: value1, key2: value2, ... }` |
 | `waypoint` | Flugrouten-Wegpunkt | `{ lat: number, lng: number, altitude: number, index: number, name?: string, speed?: number, actions?: object[] }` |
 | `area_cutout` | Ausschnitt/Loch innerhalb einer Flächenmessung | `{ linked_measurement_uuid: string, points: [x,y,z][] }` (verknüpft mit `potree_scene.measurements[].uuid`) |
+| `alignment_transform` | Realignment-Matrix (3-Punkt-Methode), die im 3D-Viewer auf Punktwolke + Mesh angewendet wird | `{ points: [x,y,z][3], matrix: number[16], options: { reset_z_to_zero: boolean }, enabled: boolean }` (siehe TS-Interface unten) |
 
 ### ProjectEntryAttachment
 
@@ -285,7 +286,10 @@ export type EntryType =
   | 'report'
   | 'keyvalue'
   | 'waypoint'
-  | 'area_cutout';
+  | 'area_cutout'
+  | 'roof_outline'
+  | 'cad_result'
+  | 'alignment_transform';
 
 export interface Attachment {
   id: string;
@@ -358,6 +362,25 @@ export interface WaypointData {
 export interface AreaCutoutData {
   linked_measurement_uuid: string;          // UUID der Außenflächenmessung aus potree_scene
   points: [number, number, number][];       // 3D-Eckpunkte des Ausschnitts
+}
+
+export interface AlignmentTransformData {
+  // Drei vom User gewählte Punkte (Welt-Koordinaten der Original-Punktwolke),
+  // die auf einer als "horizontal" definierten Ebene liegen.
+  points: [
+    [number, number, number],
+    [number, number, number],
+    [number, number, number]
+  ];
+  // 4×4-Matrix in column-major Reihenfolge (THREE.Matrix4.toArray()),
+  // wird im Viewer per pointcloud.applyMatrix4() / mesh.applyMatrix4() angewendet.
+  matrix: number[];
+  options: {
+    // Wenn true: nach der Rotation wird der Schwerpunkt der 3 Punkte auf Z=0 gezogen.
+    reset_z_to_zero: boolean;
+  };
+  // Steuert, ob die Korrektur beim Öffnen des Viewers automatisch angewendet wird.
+  enabled: boolean;
 }
 ```
 
