@@ -558,25 +558,40 @@ class RealignController {
   isLoaded() { return this._loaded; }
 
   _captureOriginal(obj) {
-    if (!obj._realignOriginalMatrix) {
-      obj._realignOriginalMatrix = obj.matrix.clone();
-      obj._realignOriginalAuto = obj.matrixAutoUpdate;
+    if (!obj._realignOriginalCaptured) {
+      obj._realignOriginalPos = obj.position.clone();
+      obj._realignOriginalQuat = obj.quaternion.clone();
+      obj._realignOriginalScale = obj.scale.clone();
+      obj._realignOriginalCaptured = true;
     }
   }
 
   _applyToObject(obj, M) {
     this._captureOriginal(obj);
-    obj.matrixAutoUpdate = false;
-    obj.matrix.copy(obj._realignOriginalMatrix);
-    obj.matrix.premultiply(M);
-    obj.updateMatrixWorld(true);
+    const THREE = getTHREE();
+    // newMatrix = M · originalMatrix(pos, quat, scale)
+    const originalM = new THREE.Matrix4().compose(
+      obj._realignOriginalPos,
+      obj._realignOriginalQuat,
+      obj._realignOriginalScale
+    );
+    const newM = new THREE.Matrix4().copy(M).multiply(originalM);
+    newM.decompose(obj.position, obj.quaternion, obj.scale);
+    if (obj.matrixAutoUpdate === false && typeof obj.updateMatrix === 'function') {
+      obj.updateMatrix();
+    }
+    obj.matrixWorldNeedsUpdate = true;
   }
 
   _revertObject(obj) {
-    if (obj._realignOriginalMatrix) {
-      obj.matrix.copy(obj._realignOriginalMatrix);
-      obj.matrixAutoUpdate = obj._realignOriginalAuto !== false;
-      obj.updateMatrixWorld(true);
+    if (obj._realignOriginalCaptured) {
+      obj.position.copy(obj._realignOriginalPos);
+      obj.quaternion.copy(obj._realignOriginalQuat);
+      obj.scale.copy(obj._realignOriginalScale);
+      if (obj.matrixAutoUpdate === false && typeof obj.updateMatrix === 'function') {
+        obj.updateMatrix();
+      }
+      obj.matrixWorldNeedsUpdate = true;
     }
   }
 
