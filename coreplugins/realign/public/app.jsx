@@ -130,10 +130,11 @@ class RealignPanel extends React.Component {
     }
 
     const viewer = this.props.viewer;
-    // maxMarkers=2: Potree fügt einen schwebenden Vorschau-Marker hinzu (der mit der
-    // Maus mitwandert) und beim ersten Klick einen "fixierten" Marker. length geht
-    // dann von 1 auf 2 — daran erkennen wir den Klick. Den Vorschau-Marker entfernen
-    // wir nach dem Klick selbst.
+    // maxMarkers=2: erst dann hängt Potrees MeasuringTool den Mouseup-Listener an
+    // (siehe potree.js: `if (measure.maxMarkers > 1)`). Bei maxMarkers=1 bleibt der
+    // initiale (0,0,0)-Marker als schwebender Cursor — kein Klick wird erfasst.
+    // Mit 2 setzt der erste Klick den fixen Marker[0], Marker[1] ist der neue
+    // (hängengebliebene) Vorschau-Marker.
     const measure = viewer.measuringTool.startInsertion({
       showDistances: false,
       showAngles: false,
@@ -148,20 +149,28 @@ class RealignPanel extends React.Component {
     this.setState({ pickingIndex: index });
 
     let finalized = false;
+    const extractPosition = (m) => {
+      // Position aus dem Marker lesen — primär points[0].position, fallback sphere[0].position
+      if (!m) return null;
+      if (m.points && m.points[0] && m.points[0].position && typeof m.points[0].position.clone === 'function') {
+        const p = m.points[0].position;
+        if (p.x !== 0 || p.y !== 0 || p.z !== 0) return p.clone();
+      }
+      if (m.spheres && m.spheres[0] && m.spheres[0].position && typeof m.spheres[0].position.clone === 'function') {
+        const p = m.spheres[0].position;
+        if (p.x !== 0 || p.y !== 0 || p.z !== 0) return p.clone();
+      }
+      return null;
+    };
+
     const finalize = () => {
       if (finalized) return;
       const m = measure;
-      if (!m || !m.points || m.points.length < 2) return;
-      // points[0] ist der gepickte Punkt, points[1] der hängengebliebene Vorschau-Marker
-      const marker = m.points[0];
-      const pos = (marker && marker.position && typeof marker.position.clone === 'function')
-        ? marker.position.clone()
-        : null;
-      if (!pos || (pos.x === 0 && pos.y === 0 && pos.z === 0)) return;
+      const pos = extractPosition(m);
+      if (!pos) return;
       finalized = true;
-      // Vorschau-Marker abräumen, damit nur der gepickte Punkt sichtbar bleibt
       try {
-        while (m.points.length > 1) m.removeMarker(m.points.length - 1);
+        while (m.points && m.points.length > 1) m.removeMarker(m.points.length - 1);
       } catch (e) {}
       this.persistentMeasures[index] = m;
       this.activeMeasure = null;
@@ -169,11 +178,24 @@ class RealignPanel extends React.Component {
         clearInterval(this._pollTimer);
         this._pollTimer = null;
       }
+      try { measure.removeEventListener('marker_dropped', onDropped); } catch (e) {}
       const newPoints = this.state.points.slice();
       newPoints[index] = pos;
       this.setState({ points: newPoints, pickingIndex: -1 });
     };
 
+    const onDropped = (e) => {
+      if (finalized) return;
+      // marker_dropped feuert beim Mouseup nach Drag — wir warten kurz, damit
+      // Potrees insertionCallback (der den Vorschau-Marker hinzufügt + Position
+      // finalisiert) garantiert vor unserem extractPosition durch ist.
+      setTimeout(() => { if (!finalized) finalize(); }, 50);
+    };
+    if (typeof measure.addEventListener === 'function') {
+      measure.addEventListener('marker_dropped', onDropped);
+    }
+
+    // Polling-Fallback, falls das Event aus irgendeinem Grund nicht feuert
     this._pollTimer = setInterval(() => {
       if (!this.activeMeasure || finalized) {
         if (this._pollTimer) {
@@ -185,7 +207,7 @@ class RealignPanel extends React.Component {
       if (measure.points && measure.points.length >= 2) {
         finalize();
       }
-    }, 150);
+    }, 200);
   };
 
   toggleApply = () => {
