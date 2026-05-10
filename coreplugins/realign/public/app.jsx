@@ -585,67 +585,43 @@ class RealignController {
 
   isLoaded() { return this._loaded; }
 
-  _captureOriginal(obj) {
-    if (!obj._realignOriginalCaptured) {
-      obj._realignOriginalPos = obj.position.clone();
-      obj._realignOriginalQuat = obj.quaternion.clone();
-      obj._realignOriginalScale = obj.scale.clone();
-      obj._realignOriginalCaptured = true;
-    }
-  }
-
   _applyToObject(obj, M) {
-    this._captureOriginal(obj);
+    // Wrapper-Strategie: Wir packen das Object in eine THREE.Group und transformieren
+    // die Group statt das Object direkt. Potree manipuliert intern pointcloud.position
+    // (z.B. via geometry.offset im Constructor), was unsere direkten Pos-Setzungen
+    // überschreibt. Three.js' Scene-Graph kombiniert wrapper.matrix * obj.matrix
+    // automatisch, sodass die Welt-Position der Pointcloud-Punkte korrekt rotiert
+    // wird, ohne dass wir am Object selbst etwas ändern müssen.
     const THREE = getTHREE();
-    const originalM = new THREE.Matrix4().compose(
-      obj._realignOriginalPos,
-      obj._realignOriginalQuat,
-      obj._realignOriginalScale
-    );
-    const newM = new THREE.Matrix4().copy(M).multiply(originalM);
-    const tgtPos = new THREE.Vector3();
-    const tgtQuat = new THREE.Quaternion();
-    const tgtScale = new THREE.Vector3();
-    newM.decompose(tgtPos, tgtQuat, tgtScale);
-    obj._realignTargetPos = tgtPos;
-    obj._realignTargetQuat = tgtQuat;
-    obj._realignTargetScale = tgtScale;
-    // Verhindere Frustum-Culling, falls die transformierte boundingBox nicht
-    // mehr mit der Camera-Sicht overlapped.
-    if (obj._realignOriginalFrustumCulled === undefined) {
-      obj._realignOriginalFrustumCulled = obj.frustumCulled;
+    if (!obj._realignWrapper) {
+      const wrapper = new THREE.Group();
+      wrapper.name = 'realign_wrapper';
+      wrapper.frustumCulled = false;
+      const oldParent = obj.parent;
+      if (oldParent) {
+        const idx = oldParent.children.indexOf(obj);
+        oldParent.remove(obj);
+        oldParent.add(wrapper);
+        wrapper.add(obj);
+      }
+      obj._realignWrapper = wrapper;
+      wrapper._realignChild = obj;
     }
-    obj.frustumCulled = false;
-    this._forcePose(obj);
-  }
-
-  _forcePose(obj) {
-    if (!obj._realignTargetPos) return;
-    obj.position.copy(obj._realignTargetPos);
-    obj.quaternion.copy(obj._realignTargetQuat);
-    obj.scale.copy(obj._realignTargetScale);
-    if (obj.matrixAutoUpdate === false && typeof obj.updateMatrix === 'function') {
-      obj.updateMatrix();
-    }
-    obj.matrixWorldNeedsUpdate = true;
+    const wrapper = obj._realignWrapper;
+    M.decompose(wrapper.position, wrapper.quaternion, wrapper.scale);
+    wrapper.matrixWorldNeedsUpdate = true;
   }
 
   _revertObject(obj) {
-    if (obj._realignOriginalCaptured) {
-      obj._realignTargetPos = null;
-      obj._realignTargetQuat = null;
-      obj._realignTargetScale = null;
-      obj.position.copy(obj._realignOriginalPos);
-      obj.quaternion.copy(obj._realignOriginalQuat);
-      obj.scale.copy(obj._realignOriginalScale);
-      if (obj._realignOriginalFrustumCulled !== undefined) {
-        obj.frustumCulled = obj._realignOriginalFrustumCulled;
-      }
-      if (obj.matrixAutoUpdate === false && typeof obj.updateMatrix === 'function') {
-        obj.updateMatrix();
-      }
-      obj.matrixWorldNeedsUpdate = true;
+    const wrapper = obj._realignWrapper;
+    if (!wrapper) return;
+    const parent = wrapper.parent;
+    wrapper.remove(obj);
+    if (parent) {
+      parent.remove(wrapper);
+      parent.add(obj);
     }
+    obj._realignWrapper = null;
   }
 
   _collectTargets() {
@@ -669,7 +645,9 @@ class RealignController {
     }
     if (s.scene && Array.isArray(s.scene.children)) {
       s.scene.children.forEach((obj) => {
-        if (!this._isLight(obj)) targets.push(obj);
+        if (this._isLight(obj)) return;
+        if (obj._realignChild) return; // bereits ein Wrapper von uns
+        targets.push(obj);
       });
     }
     return targets;
@@ -712,23 +690,18 @@ class RealignController {
     if (this.watcher) return;
     if (!this.knownTargets) this.knownTargets = new WeakSet();
     this._collectTargets().forEach((t) => this.knownTargets.add(t));
-    // Zwei Aufgaben pro Tick:
-    // 1. Neue Targets (z.B. nachgeladenes Mesh) erfassen + transformieren
-    // 2. Bestehende Targets gegen Resets durch Potree absichern (_forcePose)
-    //    Potree manipuliert pointcloud.position für interne Updates und löscht
-    //    dabei unsere Translation. Wir erzwingen sie alle 250 ms neu.
+    // Erfasst nachträglich geladene Targets (z.B. Mesh nach Toggle) und wrappt sie.
+    // Mit dem Wrapper-Pattern brauchen wir kein Force-Pose mehr — der Wrapper bleibt
+    // unangetastet von Potree.
     this.watcher = setInterval(() => {
       if (!this.applied || !this.currentMatrix) return;
       const targets = this._collectTargets();
       targets.forEach((obj) => {
-        if (!this.knownTargets.has(obj)) {
-          this.knownTargets.add(obj);
-          this._applyToObject(obj, this.currentMatrix);
-          return;
-        }
-        this._forcePose(obj);
+        if (this.knownTargets.has(obj)) return;
+        this.knownTargets.add(obj);
+        this._applyToObject(obj, this.currentMatrix);
       });
-    }, 250);
+    }, 1000);
   }
 
   _stopWatcher() {
