@@ -694,7 +694,7 @@ class RealignController {
         this.knownTargets.add(obj);
         this._applyToObject(obj, this.currentMatrix);
       });
-    }, 1000);
+    }, 5000);
   }
 
   _stopWatcher() {
