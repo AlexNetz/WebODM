@@ -4,8 +4,14 @@ import $ from 'jquery';
 // THREE is provided as a global by WebODM's main bundle (see webpack.config.js
 // externals: { "THREE": "THREE" }). The plugin-build webpack.config.js.tmpl
 // does not list THREE as external, so we cannot `import * as THREE from 'THREE'`
-// here without bundling another copy. Read the global directly instead.
-const THREE = window.THREE;
+// here without bundling another copy.
+//
+// IMPORTANT: We must read window.THREE *at runtime*, not at module-load time.
+// main.js triggers SystemJS.import('.../app.js') early on (to win the
+// addActionButton race), so this module can be evaluated *before* the main
+// bundle has set window.THREE. Reading it on top-level would freeze it as
+// undefined permanently.
+function getTHREE() { return window.THREE; }
 
 const ENTRY_TYPE = 'alignment_transform';
 
@@ -16,6 +22,7 @@ function parseTaskFromUrl() {
 }
 
 function computeAlignmentMatrix(p1, p2, p3, resetZ) {
+  const THREE = getTHREE();
   // Rotation um den Centroid der drei Punkte, NICHT um den Welt-Origin —
   // bei UTM-Koordinaten (~518000, ~5370000) würde eine Origin-Rotation das
   // Modell weit aus dem Sichtbereich katapultieren.
@@ -67,6 +74,7 @@ class RealignPanel extends React.Component {
     const ctrl = this.props.controller;
     const hydrate = () => {
       if (!ctrl.lastData) return;
+      const THREE = getTHREE();
       const data = ctrl.lastData;
       const points = (data.points || []).map((p) => new THREE.Vector3(p[0], p[1], p[2]));
       while (points.length < 3) points.push(null);
@@ -600,6 +608,7 @@ class RealignController {
   }
 
   applyMatrix(matrixArray) {
+    const THREE = getTHREE();
     const M = new THREE.Matrix4().fromArray(matrixArray);
     this.currentMatrix = M;
     this.applied = true;
