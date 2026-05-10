@@ -287,14 +287,21 @@ def compute_edges(planes, normal_z_max=0.9848, margin=1.0, parallel_cos=0.97, ma
 # ── point2cad helpers ─────────────────────────────────────────────────────────
 
 def export_xyzc(planes, path):
-    """Write RANSAC planes as .xyzc (point2cad input). Returns coordinate stats."""
+    """Write RANSAC planes as .xyzc (point2cad input). Returns coordinate stats.
+
+    Coordinates are centred at the point-cloud centroid before writing so that
+    point2cad (and its output PLY / topo.json) works in a local frame near the
+    origin.  The original centroid is returned so callers can georeference back.
+    """
     import os
     os.makedirs(os.path.dirname(path), exist_ok=True)
     pts_all = np.vstack([p.points for p in planes])
     ids_all = np.concatenate([np.full(len(p.points), i) for i, p in enumerate(planes)])
-    np.savetxt(path, np.column_stack([pts_all.astype(np.float64), ids_all]), fmt='%.6f %.6f %.6f %d')
+    centroid = pts_all.mean(axis=0)
+    pts_centered = pts_all - centroid          # local coords, ~0-centred
+    np.savetxt(path, np.column_stack([pts_centered.astype(np.float64), ids_all]), fmt='%.6f %.6f %.6f %d')
     return {
-        'centroid': pts_all.mean(axis=0).tolist(),
+        'centroid': centroid.tolist(),         # UTM origin for back-projection
         'scale': float((pts_all.max(0) - pts_all.min(0)).max()),
         'n_planes': len(planes),
         'n_points': int(len(pts_all)),
