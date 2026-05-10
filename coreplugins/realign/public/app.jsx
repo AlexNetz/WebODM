@@ -554,13 +554,13 @@ class RealignController {
     // (a) Die Pointcloud zur scenePointCloud hinzugefügt wurde, UND
     // (b) Potree's loadProject() gelaufen ist (setzt pointcloud.position aus
     //     gespeicherter potree_scene). loadProject läuft in einem `update`-Hook
-    //     einmalig, daher 1.5 s Buffer nach pointcloud_added.
+    //     einmalig, daher 5 s Buffer nach pointcloud_added.
     // Sonst capturt _captureOriginal eine Zwischen-Position als "Original" und
     // die Pointcloud bleibt unsichtbar an der falschen Stelle.
     const apply = () => {
       setTimeout(() => {
         if (!this.applied) this.applyMatrix(matrix);
-      }, 1500);
+      }, 5000);
     };
     const scene = this.viewer && this.viewer.scene;
     if (!scene) { apply(); return; }
