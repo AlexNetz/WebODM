@@ -302,10 +302,12 @@ class RealignPanel extends React.Component {
 
     return React.createElement('div', {
       style: {
-        position: 'absolute',
-        top: 50,
-        right: 10,
+        position: 'fixed',
+        bottom: 70,
+        right: 16,
         width: 320,
+        maxHeight: 'calc(100vh - 100px)',
+        overflowY: 'auto',
         backgroundColor: 'rgba(40, 40, 40, 0.95)',
         color: '#fff',
         padding: 12,
