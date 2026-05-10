@@ -560,7 +560,7 @@ class RealignController {
     const apply = () => {
       setTimeout(() => {
         if (!this.applied) this.applyMatrix(matrix);
-      }, 5000);
+      }, 10000);
     };
     const scene = this.viewer && this.viewer.scene;
     if (!scene) { apply(); return; }
