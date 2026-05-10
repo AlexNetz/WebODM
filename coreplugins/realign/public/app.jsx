@@ -16,20 +16,33 @@ function parseTaskFromUrl() {
 }
 
 function computeAlignmentMatrix(p1, p2, p3, resetZ) {
+  // Rotation um den Centroid der drei Punkte, NICHT um den Welt-Origin —
+  // bei UTM-Koordinaten (~518000, ~5370000) würde eine Origin-Rotation das
+  // Modell weit aus dem Sichtbereich katapultieren.
   const v1 = new THREE.Vector3().subVectors(p2, p1);
   const v2 = new THREE.Vector3().subVectors(p3, p1);
   const n = new THREE.Vector3().crossVectors(v1, v2).normalize();
   if (n.z < 0) n.negate();
   const up = new THREE.Vector3(0, 0, 1);
   const q = new THREE.Quaternion().setFromUnitVectors(n, up);
-  const M = new THREE.Matrix4().makeRotationFromQuaternion(q);
+  const R = new THREE.Matrix4().makeRotationFromQuaternion(q);
+
+  const centroid = new THREE.Vector3()
+    .add(p1).add(p2).add(p3)
+    .divideScalar(3);
+
+  // M = T(centroid) · R · T(-centroid)
+  const M = new THREE.Matrix4()
+    .makeTranslation(centroid.x, centroid.y, centroid.z)
+    .multiply(R)
+    .multiply(new THREE.Matrix4().makeTranslation(-centroid.x, -centroid.y, -centroid.z));
+
   if (resetZ) {
-    const c = new THREE.Vector3()
-      .add(p1).add(p2).add(p3)
-      .divideScalar(3)
-      .applyMatrix4(M);
-    M.premultiply(new THREE.Matrix4().makeTranslation(0, 0, -c.z));
+    // Centroid bleibt nach R an seiner Z-Position (weil wir um ihn rotiert haben).
+    // Verschiebe das ganze Modell um -centroid.z, damit die gewählte Ebene auf Z=0 liegt.
+    M.premultiply(new THREE.Matrix4().makeTranslation(0, 0, -centroid.z));
   }
+
   return M;
 }
 
@@ -514,26 +527,29 @@ class RealignController {
 
   _collectTargets() {
     const targets = [];
-    if (this.viewer.scene && this.viewer.scene.scenePointclouds) {
-      this.viewer.scene.scenePointclouds.children.forEach((pc) => targets.push(pc));
+    const s = this.viewer && this.viewer.scene;
+    if (!s) return targets;
+    // Pointclouds liegen in viewer.scene.scenePointCloud (Schreibweise korrekt: PointCloud, nicht Pointclouds!)
+    if (s.scenePointCloud && Array.isArray(s.scenePointCloud.children)) {
+      s.scenePointCloud.children.forEach((obj) => {
+        if (!this._isLight(obj)) targets.push(obj);
+      });
     }
-    if (this.viewer.scene && this.viewer.scene.scene) {
-      this.viewer.scene.scene.children.forEach((obj) => {
-        if (this._looksLikeMesh(obj)) targets.push(obj);
+    // Mesh + Camera-Markers liegen in viewer.scene.scene
+    if (s.scene && Array.isArray(s.scene.children)) {
+      s.scene.children.forEach((obj) => {
+        if (!this._isLight(obj)) targets.push(obj);
       });
     }
     return targets;
   }
 
-  _looksLikeMesh(obj) {
-    if (!obj || obj.type === 'Light' || obj.type === 'AmbientLight' ||
-        obj.type === 'DirectionalLight' || obj.type === 'PointLight') return false;
-    if (obj.isLight) return false;
-    let hasMesh = false;
-    obj.traverse((child) => {
-      if (child.isMesh) hasMesh = true;
-    });
-    return hasMesh;
+  _isLight(obj) {
+    if (!obj) return true;
+    if (obj.isLight) return true;
+    const t = obj.type;
+    return t === 'AmbientLight' || t === 'DirectionalLight' ||
+           t === 'PointLight' || t === 'SpotLight' || t === 'HemisphereLight';
   }
 
   applyMatrix(matrixArray) {
@@ -552,17 +568,26 @@ class RealignController {
 
   _startMeshWatcher() {
     if (this.meshWatcher) return;
+    // Anfänglich bekannte Targets als "schon verarbeitet" markieren
+    this._collectTargets().forEach((t) => this.knownMeshes.add(t));
     this.meshWatcher = setInterval(() => {
       if (!this.applied || !this.currentMatrix) return;
-      const sceneRoot = this.viewer.scene && this.viewer.scene.scene;
-      if (!sceneRoot) return;
-      sceneRoot.children.forEach((obj) => {
-        if (this.knownMeshes.has(obj)) return;
-        if (this._looksLikeMesh(obj)) {
+      const s = this.viewer && this.viewer.scene;
+      if (!s) return;
+      const scan = (root) => {
+        if (!root || !Array.isArray(root.children)) return;
+        root.children.forEach((obj) => {
+          if (this.knownMeshes.has(obj)) return;
+          if (this._isLight(obj)) {
+            this.knownMeshes.add(obj);
+            return;
+          }
           this.knownMeshes.add(obj);
           this._applyToObject(obj, this.currentMatrix);
-        }
-      });
+        });
+      };
+      scan(s.scenePointCloud);
+      scan(s.scene);
     }, 1000);
   }
 
