@@ -47,6 +47,7 @@ class RealignPanel extends React.Component {
       messageType: '',
     };
     this.activeMeasure = null;
+    this.persistentMeasures = [null, null, null];
   }
 
   componentDidMount() {
@@ -55,6 +56,7 @@ class RealignPanel extends React.Component {
 
   componentWillUnmount() {
     this.cancelPicking();
+    this.clearPersistentMarkers();
   }
 
   setMessage = (text, type = 'info', timeout = 4000) => {
@@ -94,12 +96,19 @@ class RealignPanel extends React.Component {
     });
   };
 
+  removeMeasureSafely = (m) => {
+    if (!m) return;
+    try { this.props.viewer.scene.removeMeasurement(m); } catch (e) {}
+  };
+
   cancelPicking = () => {
     if (this.activeMeasure) {
-      try {
-        this.props.viewer.scene.removeMeasurement(this.activeMeasure);
-      } catch (e) {}
+      this.removeMeasureSafely(this.activeMeasure);
       this.activeMeasure = null;
+    }
+    if (this._pollTimer) {
+      clearInterval(this._pollTimer);
+      this._pollTimer = null;
     }
     if (this.state.pickingIndex !== -1) this.setState({ pickingIndex: -1 });
   };
@@ -114,6 +123,12 @@ class RealignPanel extends React.Component {
       );
     }
     this.cancelPicking();
+
+    if (this.persistentMeasures[index]) {
+      this.removeMeasureSafely(this.persistentMeasures[index]);
+      this.persistentMeasures[index] = null;
+    }
+
     const viewer = this.props.viewer;
     const measure = viewer.measuringTool.startInsertion({
       showDistances: false,
@@ -128,38 +143,40 @@ class RealignPanel extends React.Component {
     this.activeMeasure = measure;
     this.setState({ pickingIndex: index });
 
+    let finalized = false;
     const finalize = () => {
-      if (!measure.points || measure.points.length < 1) return;
-      const pos = measure.points[0].position.clone();
+      if (finalized) return;
+      const m = measure;
+      if (!m || !m.points || m.points.length < 1) return;
+      const marker = m.points[0];
+      const pos = (marker.position && typeof marker.position.clone === 'function')
+        ? marker.position.clone()
+        : (marker.clone ? marker.clone() : null);
+      if (!pos) return;
+      finalized = true;
+      this.persistentMeasures[index] = m;
+      this.activeMeasure = null;
+      if (this._pollTimer) {
+        clearInterval(this._pollTimer);
+        this._pollTimer = null;
+      }
       const newPoints = this.state.points.slice();
       newPoints[index] = pos;
-      try {
-        viewer.scene.removeMeasurement(measure);
-      } catch (e) {}
-      this.activeMeasure = null;
       this.setState({ points: newPoints, pickingIndex: -1 });
     };
 
-    if (typeof measure.addEventListener === 'function') {
-      const handler = () => {
-        if (measure.points && measure.points.length >= 1) {
-          measure.removeEventListener('marker_added', handler);
-          finalize();
+    this._pollTimer = setInterval(() => {
+      if (!this.activeMeasure || finalized) {
+        if (this._pollTimer) {
+          clearInterval(this._pollTimer);
+          this._pollTimer = null;
         }
-      };
-      measure.addEventListener('marker_added', handler);
-    } else {
-      const poll = setInterval(() => {
-        if (!this.activeMeasure) {
-          clearInterval(poll);
-          return;
-        }
-        if (measure.points && measure.points.length >= 1) {
-          clearInterval(poll);
-          finalize();
-        }
-      }, 200);
-    }
+        return;
+      }
+      if (measure.points && measure.points.length >= 1) {
+        finalize();
+      }
+    }, 150);
   };
 
   toggleApply = () => {
@@ -227,9 +244,19 @@ class RealignPanel extends React.Component {
     }
   };
 
+  clearPersistentMarkers = () => {
+    for (let i = 0; i < this.persistentMeasures.length; i++) {
+      if (this.persistentMeasures[i]) {
+        this.removeMeasureSafely(this.persistentMeasures[i]);
+        this.persistentMeasures[i] = null;
+      }
+    }
+  };
+
   reset = () => {
     if (this.state.busy) return;
     this.cancelPicking();
+    this.clearPersistentMarkers();
     this.props.controller.revertMatrix();
     if (!this.state.entryId) {
       this.setState({
