@@ -11,7 +11,7 @@ services:
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
   worker:
-    entrypoint: /bin/bash -c "pip install laspy -q && /webodm/wait-for-postgres.sh db /webodm/wait-for-it.sh -t 0 broker:6379 -- /webodm/wait-for-it.sh -t 0 webapp:8000 -- /webodm/worker.sh start"
+    entrypoint: /bin/bash -c "pip install laspy pygltflib -q && /webodm/wait-for-postgres.sh db /webodm/wait-for-it.sh -t 0 broker:6379 -- /webodm/wait-for-it.sh -t 0 webapp:8000 -- /webodm/worker.sh start"
     volumes:
       - ./coreplugins/project_data:/webodm/coreplugins/project_data:ro
       - ./coreplugins/roof_detect:/webodm/coreplugins/roof_detect:ro

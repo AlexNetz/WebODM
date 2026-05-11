@@ -1,0 +1,124 @@
+import os
+
+from rest_framework import status
+from rest_framework.response import Response
+
+from app.plugins.views import TaskView
+from app.plugins.worker import run_function_async
+from worker.tasks import TestSafeAsyncResult
+
+from .tasks import _run_export_task
+
+
+class ExportView(TaskView):
+    def post(self, request, pk=None, project_pk=None):
+        task = self.get_and_check_task(request, pk)
+
+        matrix = request.data.get('matrix')
+        if not isinstance(matrix, list) or len(matrix) != 16:
+            return Response(
+                {'error': 'matrix muss eine Liste von 16 Zahlen sein.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            matrix = [float(v) for v in matrix]
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'matrix enthält ungültige Werte.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Resolve source file paths (get_asset_download_path returns an absolute path
+        # for string-valued ASSETS_MAP entries without checking existence)
+        laz_path = task.get_asset_download_path('georeferenced_model.laz')
+        if not os.path.isfile(laz_path):
+            las_path = task.get_asset_download_path('georeferenced_model.las')
+            if os.path.isfile(las_path):
+                laz_path = las_path
+            else:
+                return Response(
+                    {'error': 'Keine Punktwolke (LAZ/LAS) für diesen Task gefunden.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+        glb_path = task.get_asset_download_path('textured_model.glb')
+        if not os.path.isfile(glb_path):
+            glb_path = None
+
+        output_dir = task.assets_path('realigned')
+
+        try:
+            celery_result = run_function_async(
+                _run_export_task,
+                laz_path,
+                glb_path,
+                matrix,
+                output_dir,
+                with_progress=True,
+            )
+            return Response({'celery_task_id': celery_result.task_id}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ExportStatusView(TaskView):
+    def get(self, request, pk=None, project_pk=None, celery_task_id=None):
+        self.get_and_check_task(request, pk)
+
+        res = TestSafeAsyncResult(celery_task_id)
+
+        if not res.ready():
+            out = {'ready': False, 'status': res.state, 'progress': 0}
+            if res.state == 'PROGRESS' and res.info:
+                out['status']   = res.info.get('status', res.state)
+                out['progress'] = res.info.get('progress', 0)
+            return Response(out)
+
+        try:
+            result = res.get()
+        except Exception as e:
+            return Response({'ready': True, 'status': 'FAILURE', 'error': str(e)})
+
+        base = '/api/plugins/realign/project/{}/tasks/{}/export/download'.format(
+            project_pk, pk
+        )
+        output = {}
+        if isinstance(result, dict):
+            if result.get('laz'):
+                output['laz_url'] = base + '/laz/'
+            if result.get('glb'):
+                output['glb_url'] = base + '/glb/'
+
+        return Response({
+            'ready':    True,
+            'status':   'SUCCESS',
+            'progress': 100,
+            'output':   output,
+        })
+
+
+class ExportDownloadView(TaskView):
+    def get(self, request, pk=None, project_pk=None, kind=None):
+        task = self.get_and_check_task(request, pk)
+
+        filename_map = {
+            'laz': 'model_realigned.laz',
+            'glb': 'model_realigned.glb',
+        }
+        if kind not in filename_map:
+            return Response({'error': 'Ungültiger Typ.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        file_path = task.assets_path('realigned', filename_map[kind])
+        if not os.path.isfile(file_path):
+            return Response(
+                {'error': '{}-Datei nicht gefunden. Bitte zuerst exportieren.'.format(kind.upper())},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        from django.http import FileResponse
+        return FileResponse(
+            open(file_path, 'rb'),
+            content_type='application/octet-stream',
+            as_attachment=True,
+            filename=filename_map[kind],
+        )

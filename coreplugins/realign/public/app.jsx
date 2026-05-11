@@ -65,9 +65,15 @@ class RealignPanel extends React.Component {
       busy: false,
       message: '',
       messageType: '',
+      exportStatus: null,   // null | 'running' | 'done' | 'failed'
+      exportProgress: 0,
+      exportTaskId: null,
+      exportUrls: null,     // { laz_url?, glb_url? }
+      exportError: null,
     };
     this.activeMeasure = null;
     this.persistentMeasures = [null, null, null];
+    this._exportPollTimer = null;
   }
 
   componentDidMount() {
@@ -95,6 +101,10 @@ class RealignPanel extends React.Component {
   componentWillUnmount() {
     this.cancelPicking();
     this.clearPersistentMarkers();
+    if (this._exportPollTimer) {
+      clearInterval(this._exportPollTimer);
+      this._exportPollTimer = null;
+    }
   }
 
   setMessage = (text, type = 'info', timeout = 4000) => {
@@ -331,13 +341,63 @@ class RealignPanel extends React.Component {
     });
   };
 
+  exportApiBase = () =>
+    `/api/plugins/realign/project/${this.props.projectId}/tasks/${this.props.taskId}/export/`;
+
+  startExport = () => {
+    const ctrl = this.props.controller;
+    if (!ctrl.lastData || !ctrl.lastData.matrix) {
+      this.setMessage('Keine gespeicherte Matrix. Bitte erst speichern.', 'warning');
+      return;
+    }
+    this.setState({ exportStatus: 'running', exportProgress: 0, exportUrls: null, exportError: null });
+    $.ajax({
+      url: this.exportApiBase(),
+      method: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify({ matrix: ctrl.lastData.matrix }),
+    }).done((resp) => {
+      this.setState({ exportTaskId: resp.celery_task_id });
+      this._startExportPoll(resp.celery_task_id);
+    }).fail((xhr) => {
+      const err = (xhr.responseJSON && xhr.responseJSON.error) || xhr.statusText || 'Unbekannter Fehler';
+      this.setState({ exportStatus: 'failed', exportError: 'Export-Start fehlgeschlagen: ' + err });
+    });
+  };
+
+  _startExportPoll = (celeryTaskId) => {
+    if (this._exportPollTimer) clearInterval(this._exportPollTimer);
+    this._exportPollTimer = setInterval(() => {
+      $.ajax({
+        url: this.exportApiBase() + celeryTaskId + '/',
+        method: 'GET',
+      }).done((resp) => {
+        if (!resp.ready) {
+          this.setState({ exportProgress: resp.progress || 0 });
+          return;
+        }
+        clearInterval(this._exportPollTimer);
+        this._exportPollTimer = null;
+        if (resp.status === 'SUCCESS') {
+          this.setState({ exportStatus: 'done', exportProgress: 100, exportUrls: resp.output || {} });
+        } else {
+          this.setState({ exportStatus: 'failed', exportError: resp.error || 'Export fehlgeschlagen.' });
+        }
+      });
+      // Transient poll errors are silently ignored — next tick retries.
+    }, 2000);
+  };
+
   fmt = (p) => {
     if (!p) return '–';
     return p.x.toFixed(2) + ', ' + p.y.toFixed(2) + ', ' + p.z.toFixed(2);
   };
 
   render() {
-    const { points, pickingIndex, resetZ, enabled, busy, message, messageType } = this.state;
+    const {
+      points, pickingIndex, resetZ, enabled, busy, message, messageType,
+      exportStatus, exportProgress, exportUrls, exportError,
+    } = this.state;
     const allPicked = points.every((p) => !!p);
 
     const pointRow = (i) => (
@@ -458,7 +518,70 @@ class RealignPanel extends React.Component {
           title: 'Löscht die Ausrichtung',
         }, React.createElement('i', { className: 'fa fa-trash' }))
       ),
-      message ? React.createElement('div', { style: messageStyle }, message) : null
+      message ? React.createElement('div', { style: messageStyle }, message) : null,
+
+      // ── Export section ────────────────────────────────────────────────────
+      React.createElement('hr', { style: { borderColor: '#555', margin: '10px 0 8px' } }),
+      React.createElement('button', {
+        type: 'button',
+        className: 'btn btn-sm btn-info',
+        onClick: this.startExport,
+        disabled: !this.state.entryId || exportStatus === 'running',
+        style: { width: '100%' },
+      },
+        React.createElement('i', {
+          className: exportStatus === 'running' ? 'fa fa-circle-notch fa-spin' : 'fa fa-download',
+          style: { marginRight: 4 },
+        }),
+        'Modell exportieren'
+      ),
+
+      // Progress bar (visible while Celery task runs)
+      exportStatus === 'running' ? React.createElement('div', { style: { marginTop: 6 } },
+        React.createElement('div', { style: { background: '#444', borderRadius: 3, height: 8 } },
+          React.createElement('div', {
+            style: {
+              background: '#17a2b8',
+              borderRadius: 3,
+              height: 8,
+              width: (exportProgress || 0) + '%',
+              transition: 'width 0.3s',
+            },
+          })
+        ),
+        React.createElement('div', { style: { fontSize: 11, color: '#aaa', marginTop: 2, textAlign: 'center' } },
+          (exportProgress || 0) + '%'
+        )
+      ) : null,
+
+      // Download buttons (visible when done)
+      exportStatus === 'done' && exportUrls ? React.createElement('div', {
+        style: { marginTop: 6, display: 'flex', gap: 6 },
+      },
+        exportUrls.laz_url ? React.createElement('a', {
+          href: exportUrls.laz_url,
+          className: 'btn btn-sm btn-outline-success',
+          style: { flex: '1 1 auto', textAlign: 'center' },
+          download: true,
+        },
+          React.createElement('i', { className: 'fa fa-cloud-download', style: { marginRight: 4 } }),
+          'LAZ'
+        ) : null,
+        exportUrls.glb_url ? React.createElement('a', {
+          href: exportUrls.glb_url,
+          className: 'btn btn-sm btn-outline-success',
+          style: { flex: '1 1 auto', textAlign: 'center' },
+          download: true,
+        },
+          React.createElement('i', { className: 'fa fa-cube', style: { marginRight: 4 } }),
+          'GLB'
+        ) : null,
+      ) : null,
+
+      // Export error
+      exportStatus === 'failed' ? React.createElement('div', {
+        style: { marginTop: 6, padding: '4px 8px', borderRadius: 3, fontSize: 12, backgroundColor: '#5a1f1f' },
+      }, exportError || 'Export fehlgeschlagen.') : null,
     );
   }
 }
