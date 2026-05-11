@@ -97,7 +97,13 @@ def _run_export_task(laz_path, glb_path, matrix, output_dir, progress_callback=N
 
                     if attr_name == 'POSITION':
                         if rtc_center is not None:
-                            verts += rtc_center
+                            # WebODM viewer only applies center.x and center.y as
+                            # scene translation (ModelView.jsx translateX/translateY).
+                            # center.z is intentionally ignored — GLB vertices already
+                            # carry absolute Z values. Adding center.z would double the
+                            # altitude and place the mesh kilometres off.
+                            verts[:, 0] += rtc_center[0]
+                            verts[:, 1] += rtc_center[1]
                         ones   = np.ones((count, 1), dtype=np.float64)
                         result = (M @ np.concatenate([verts, ones], axis=1).T).T[:, :3]
                         # Update bounding box stored in the accessor
