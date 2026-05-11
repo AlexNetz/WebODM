@@ -47,6 +47,22 @@ class ExportView(TaskView):
 
         output_dir = task.assets_path('realigned')
 
+        # Read the georeferencing offset from coords.txt (line 2: "X_UTM Y_UTM").
+        # The GLB model uses local coordinates: local_xy = UTM_xy - geo_offset.
+        # We pass this so the worker can compute M in local space for the GLB.
+        geo_offset = [0.0, 0.0]
+        coords_path = task.assets_path('odm_georeferencing', 'coords.txt')
+        if os.path.isfile(coords_path):
+            try:
+                with open(coords_path) as f:
+                    lines = f.read().strip().split('\n')
+                if len(lines) >= 2:
+                    parts = lines[1].strip().split()
+                    if len(parts) >= 2:
+                        geo_offset = [float(parts[0]), float(parts[1])]
+            except Exception:
+                pass
+
         try:
             celery_result = run_function_async(
                 _run_export_task,
@@ -54,6 +70,7 @@ class ExportView(TaskView):
                 glb_path,
                 matrix,
                 output_dir,
+                geo_offset,
                 with_progress=True,
             )
             return Response({'celery_task_id': celery_result.task_id}, status=status.HTTP_200_OK)

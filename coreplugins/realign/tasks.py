@@ -1,4 +1,4 @@
-def _run_export_task(laz_path, glb_path, matrix, output_dir, progress_callback=None):
+def _run_export_task(laz_path, glb_path, matrix, output_dir, geo_offset=None, progress_callback=None):
     """
     Celery worker function: transforms LAZ + GLB files using the alignment matrix.
 
@@ -77,6 +77,24 @@ def _run_export_task(laz_path, glb_path, matrix, output_dir, progress_callback=N
     # THREE.js Matrix4.toArray() is column-major → reshape with order='F' to get
     # the correct mathematical 4×4 matrix where M[row, col] = element at (row, col).
     M = np.asarray(matrix, dtype=np.float64).reshape(4, 4, order='F')
+
+    # GLB vertices use LOCAL coordinates: local_xy = UTM_xy - geo_offset, Z is absolute.
+    # Our M was computed from UTM pick-coordinates, so we need a local version:
+    #   M_local = T(-offset) · M · T(offset)
+    # Applied to a local vertex v: M_local @ v = T(-offset) @ M @ (v + offset)
+    #                                           = M(UTM_vertex) - offset  (leveled local)
+    if geo_offset and (geo_offset[0] != 0.0 or geo_offset[1] != 0.0):
+        ox, oy = float(geo_offset[0]), float(geo_offset[1])
+        T_pos = np.eye(4, dtype=np.float64)
+        T_pos[0, 3] = ox
+        T_pos[1, 3] = oy
+        T_neg = np.eye(4, dtype=np.float64)
+        T_neg[0, 3] = -ox
+        T_neg[1, 3] = -oy
+        M_local = T_neg @ M @ T_pos
+    else:
+        M_local = M
+
     os.makedirs(output_dir, exist_ok=True)
 
     _progress('Starte LAZ-Export…', 2)
@@ -120,7 +138,7 @@ def _run_export_task(laz_path, glb_path, matrix, output_dir, progress_callback=N
 
     if glb_path and os.path.isfile(glb_path):
         out_glb = os.path.join(output_dir, 'model_realigned.glb')
-        _transform_glb(glb_path, out_glb, M)
+        _transform_glb(glb_path, out_glb, M_local)
         result['glb'] = out_glb
     else:
         _progress('Kein GLB vorhanden, überspringe…', 90)
