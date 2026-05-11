@@ -19,20 +19,30 @@ def _run_export_task(laz_path, glb_path, matrix, output_dir, progress_callback=N
             progress_callback(msg, pct)
 
     def _transform_glb(in_path, out_path, M):
-        """Transform GLB mesh vertices/normals/tangents in-place using 4x4 matrix M."""
+        """
+        Transform GLB mesh vertices/normals/tangents using 4x4 matrix M.
+
+        Two-pass strategy for POSITION vertices:
+          Pass 1 — bake CESIUM_RTC (x,y only), apply M → world-space coords (float64)
+          After pass 1 — compute new centroid from all transformed POSITION vertices
+          Pass 2 — subtract centroid (x,y) to get local coords, write float32
+          Then set new CESIUM_RTC extension with updated center.
+
+        This keeps the output compatible with WebODM's viewer and Cesium-based viewers:
+        both expect large UTM coordinates to be handled via CESIUM_RTC, not stored raw
+        in float32 vertices (which would lose precision and confuse camera auto-placement).
+        """
         import pygltflib
         import numpy as np
 
         gltf = pygltflib.GLTF2.load(in_path)
 
-        # CESIUM_RTC: bake the center offset into vertex coordinates before applying M.
-        # Without this step M acts only on the local-space coords, which are near-zero —
-        # the RTC center carries the world-space position, so the result would be wrong.
-        rtc_center = None
+        # Extract and remove old CESIUM_RTC (only x,y used by WebODM viewer)
+        rtc_xy = np.zeros(2, dtype=np.float64)
         if gltf.extensionsUsed and 'CESIUM_RTC' in gltf.extensionsUsed:
             ext_data = (gltf.extensions or {}).get('CESIUM_RTC', {})
-            center = ext_data.get('center', [0.0, 0.0, 0.0])
-            rtc_center = np.array(center, dtype=np.float64)
+            center   = ext_data.get('center', [0.0, 0.0, 0.0])
+            rtc_xy   = np.array([center[0], center[1]], dtype=np.float64)
             gltf.extensionsUsed = [e for e in gltf.extensionsUsed if e != 'CESIUM_RTC']
             if gltf.extensionsRequired:
                 gltf.extensionsRequired = [e for e in gltf.extensionsRequired
@@ -40,12 +50,38 @@ def _run_export_task(laz_path, glb_path, matrix, output_dir, progress_callback=N
             if gltf.extensions and 'CESIUM_RTC' in gltf.extensions:
                 del gltf.extensions['CESIUM_RTC']
 
-        R3 = M[:3, :3]  # rotation part — applied to normals/tangents (no translation)
-
+        R3  = M[:3, :3]  # rotation part — applied to normals/tangents
         raw = gltf.binary_blob()
         if raw is None:
             raise ValueError('GLB hat keinen Binary-Chunk.')
         blob = bytearray(raw)
+
+        def _read_verts(byte_offset, count, comp, item_bytes, byte_stride):
+            if byte_stride and byte_stride != item_bytes:
+                return np.array([
+                    np.frombuffer(
+                        blob[byte_offset + i * byte_stride:
+                             byte_offset + i * byte_stride + item_bytes],
+                        dtype=np.float32,
+                    )
+                    for i in range(count)
+                ], dtype=np.float32)
+            return np.frombuffer(
+                blob[byte_offset:byte_offset + count * item_bytes],
+                dtype=np.float32,
+            ).reshape(count, comp).copy()
+
+        def _write_verts(result_f32, byte_offset, count, item_bytes, byte_stride):
+            new_bytes = result_f32.tobytes()
+            if byte_stride and byte_stride != item_bytes:
+                for i in range(count):
+                    s = byte_offset + i * byte_stride
+                    blob[s:s + item_bytes] = new_bytes[i * item_bytes:(i + 1) * item_bytes]
+            else:
+                blob[byte_offset:byte_offset + len(new_bytes)] = new_bytes
+
+        # Pass 1: transform all attributes; collect world-space POSITION arrays
+        pos_records = []  # (acc, byte_offset, count, item_bytes, byte_stride, world_verts_f64)
 
         for mesh in (gltf.meshes or []):
             for primitive in (mesh.primitives or []):
@@ -60,76 +96,64 @@ def _run_export_task(laz_path, glb_path, matrix, output_dir, progress_callback=N
                 ]:
                     if accessor_idx is None:
                         continue
-
                     acc = gltf.accessors[accessor_idx]
                     if acc.bufferView is None:
-                        continue  # sparse accessor — no buffer view, skip
-                    bv  = gltf.bufferViews[acc.bufferView]
+                        continue  # sparse accessor — skip
+                    bv = gltf.bufferViews[acc.bufferView]
 
                     byte_offset = (bv.byteOffset or 0) + (acc.byteOffset or 0)
                     count       = acc.count
-                    byte_stride = bv.byteStride  # None = tightly packed
+                    byte_stride = bv.byteStride
+                    comp        = 3 if attr_name in ('POSITION', 'NORMAL') else 4
+                    item_bytes  = comp * 4
 
-                    if attr_name in ('POSITION', 'NORMAL'):
-                        comp       = 3
-                        item_bytes = 12   # 3 × float32
-                    else:
-                        comp       = 4    # TANGENT = vec4 (xyz + handedness w)
-                        item_bytes = 16
-
-                    if byte_stride and byte_stride != item_bytes:
-                        # Interleaved buffer — read each element individually
-                        verts = np.array([
-                            np.frombuffer(
-                                blob[byte_offset + i * byte_stride:
-                                     byte_offset + i * byte_stride + item_bytes],
-                                dtype=np.float32,
-                            )
-                            for i in range(count)
-                        ], dtype=np.float32)
-                    else:
-                        verts = np.frombuffer(
-                            blob[byte_offset:byte_offset + count * item_bytes],
-                            dtype=np.float32,
-                        ).reshape(count, comp).copy()
-
-                    verts = verts.astype(np.float64)
+                    verts = _read_verts(byte_offset, count, comp, item_bytes, byte_stride).astype(np.float64)
 
                     if attr_name == 'POSITION':
-                        if rtc_center is not None:
-                            # WebODM viewer only applies center.x and center.y as
-                            # scene translation (ModelView.jsx translateX/translateY).
-                            # center.z is intentionally ignored — GLB vertices already
-                            # carry absolute Z values. Adding center.z would double the
-                            # altitude and place the mesh kilometres off.
-                            verts[:, 0] += rtc_center[0]
-                            verts[:, 1] += rtc_center[1]
+                        verts[:, 0] += rtc_xy[0]   # bake RTC x
+                        verts[:, 1] += rtc_xy[1]   # bake RTC y (z stays absolute)
                         ones   = np.ones((count, 1), dtype=np.float64)
                         result = (M @ np.concatenate([verts, ones], axis=1).T).T[:, :3]
-                        # Update bounding box stored in the accessor
-                        acc.min = result.min(axis=0).tolist()
-                        acc.max = result.max(axis=0).tolist()
+                        pos_records.append((acc, byte_offset, count, item_bytes, byte_stride, result))
+                        # (written in pass 2 after centroid is known)
 
                     elif attr_name == 'NORMAL':
                         result = (R3 @ verts.T).T
                         lens   = np.linalg.norm(result, axis=1, keepdims=True)
                         lens[lens < 1e-10] = 1.0
-                        result = result / lens
+                        result /= lens
+                        _write_verts(result.astype(np.float32), byte_offset, count, item_bytes, byte_stride)
 
                     else:  # TANGENT
-                        r_xyz  = (R3 @ verts[:, :3].T).T
-                        lens   = np.linalg.norm(r_xyz, axis=1, keepdims=True)
+                        r_xyz = (R3 @ verts[:, :3].T).T
+                        lens  = np.linalg.norm(r_xyz, axis=1, keepdims=True)
                         lens[lens < 1e-10] = 1.0
                         result = np.concatenate([r_xyz / lens, verts[:, 3:4]], axis=1)
+                        _write_verts(result.astype(np.float32), byte_offset, count, item_bytes, byte_stride)
 
-                    new_bytes = result.astype(np.float32).tobytes()
+        # Compute new centroid from all transformed POSITION vertices
+        if pos_records:
+            all_x = np.concatenate([r[5][:, 0] for r in pos_records])
+            all_y = np.concatenate([r[5][:, 1] for r in pos_records])
+            new_cx = float(np.mean(all_x))
+            new_cy = float(np.mean(all_y))
 
-                    if byte_stride and byte_stride != item_bytes:
-                        for i in range(count):
-                            s = byte_offset + i * byte_stride
-                            blob[s:s + item_bytes] = new_bytes[i * item_bytes:(i + 1) * item_bytes]
-                    else:
-                        blob[byte_offset:byte_offset + len(new_bytes)] = new_bytes
+            # Pass 2: subtract centroid (x,y) → local coords, write float32
+            for (acc, byte_offset, count, item_bytes, byte_stride, world_verts) in pos_records:
+                world_verts[:, 0] -= new_cx
+                world_verts[:, 1] -= new_cy
+                acc.min = world_verts.min(axis=0).tolist()
+                acc.max = world_verts.max(axis=0).tolist()
+                _write_verts(world_verts.astype(np.float32), byte_offset, count, item_bytes, byte_stride)
+
+            # Reconstruct CESIUM_RTC with new center (z=0: vertices carry absolute Z)
+            if not gltf.extensionsUsed:
+                gltf.extensionsUsed = []
+            if 'CESIUM_RTC' not in gltf.extensionsUsed:
+                gltf.extensionsUsed.append('CESIUM_RTC')
+            if not gltf.extensions:
+                gltf.extensions = {}
+            gltf.extensions['CESIUM_RTC'] = {'center': [new_cx, new_cy, 0.0]}
 
         gltf.set_binary_blob(bytes(blob))
         gltf.save(out_path)
