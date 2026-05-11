@@ -145,3 +145,96 @@ def _run_export_task(laz_path, glb_path, matrix, output_dir, geo_offset=None, pr
 
     _progress('Fertig', 100)
     return result
+
+
+def _run_apply_task(project_id_str, task_id_str, assets_root, realigned_dir, progress_callback=None):
+    """
+    Apply realigned files persistently:
+      1. Regenerate Entwine octree from realigned LAZ
+      2. Backup originals (idempotent — only on first apply)
+      3. Swap entwine_pointcloud + textured_model.glb in-place
+      4. Mark project_data alignment_transform.applied = True
+
+    Pre-condition: ExportView must have been run so model_realigned.laz exists
+    in realigned_dir. The API layer (ApplyView) checks this and returns 400
+    if missing.
+
+    Self-contained: all imports inside (run_function_async ships source via
+    inspect.getsource and eval's it in the worker).
+    """
+    import os
+    import shutil
+    import subprocess
+
+    def _progress(msg, pct):
+        if progress_callback:
+            progress_callback(msg, pct)
+
+    realigned_laz = os.path.join(realigned_dir, 'model_realigned.laz')
+    realigned_glb = os.path.join(realigned_dir, 'model_realigned.glb')
+    realigned_ept = os.path.join(realigned_dir, 'entwine_pointcloud')
+
+    if not os.path.isfile(realigned_laz):
+        raise FileNotFoundError(
+            'Realignte Punktwolke nicht gefunden: ' + realigned_laz +
+            '. Bitte zuerst den Export ausführen.'
+        )
+
+    ept_target     = os.path.join(assets_root, 'entwine_pointcloud')
+    ept_backup     = os.path.join(assets_root, 'entwine_pointcloud_original')
+    glb_target     = os.path.join(assets_root, 'odm_texturing', 'odm_textured_model_geo.glb')
+    glb_backup     = os.path.join(assets_root, 'odm_texturing', 'odm_textured_model_geo.original.glb')
+
+    # 1. Regenerate EPT from realigned LAZ
+    _progress('Erzeuge Entwine-Octree…', 5)
+    if os.path.isdir(realigned_ept):
+        shutil.rmtree(realigned_ept)
+    subprocess.check_call([
+        'entwine', 'build',
+        '-i', realigned_laz,
+        '-o', realigned_ept,
+    ])
+
+    _progress('Sichere Original-Dateien…', 60)
+
+    # 2. Backups — idempotent.
+    # If ept_backup exists, the current ept_target is already a realigned version
+    # from a previous apply. Discard it.
+    if os.path.isdir(ept_backup):
+        if os.path.isdir(ept_target):
+            shutil.rmtree(ept_target)
+    elif os.path.isdir(ept_target):
+        shutil.move(ept_target, ept_backup)
+
+    if os.path.isfile(glb_backup):
+        if os.path.isfile(glb_target):
+            os.remove(glb_target)
+    elif os.path.isfile(glb_target):
+        shutil.move(glb_target, glb_backup)
+
+    _progress('Tausche Dateien…', 80)
+
+    # 3. Swap in the realigned versions.
+    # EPT: move (avoids double disk usage for potentially large octree).
+    # GLB: copy2 — keep the downloadable file in realigned_dir intact.
+    shutil.move(realigned_ept, ept_target)
+    if os.path.isfile(realigned_glb):
+        os.makedirs(os.path.dirname(glb_target), exist_ok=True)
+        shutil.copy2(realigned_glb, glb_target)
+
+    # 4. Update project_data alignment_transform.applied = True
+    _progress('Markiere als angewendet…', 95)
+    from coreplugins.project_data.models import ProjectEntry
+    entries = ProjectEntry.objects.filter(
+        project_id=project_id_str,
+        task_id=task_id_str,
+        entry_type='alignment_transform',
+    )
+    for entry in entries:
+        data = dict(entry.data or {})
+        data['applied'] = True
+        entry.data = data
+        entry.save(update_fields=['data', 'updated_at'])
+
+    _progress('Fertig', 100)
+    return {'ok': True}

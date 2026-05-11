@@ -1,5 +1,8 @@
 from app.plugins import PluginBase, MountPoint
-from .api import ExportView, ExportStatusView, ExportDownloadView
+from .api import (
+    ExportView, ExportStatusView, ExportDownloadView,
+    ApplyView, ApplyStatusView, RevertView,
+)
 
 
 class Plugin(PluginBase):
@@ -11,6 +14,7 @@ class Plugin(PluginBase):
 
     def api_mount_points(self):
         return [
+            # ── Export (Phase 2) ──────────────────────────────────────────
             MountPoint(
                 'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/export/$',
                 ExportView.as_view(),
@@ -22,5 +26,19 @@ class Plugin(PluginBase):
             MountPoint(
                 'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/export/(?P<celery_task_id>[^/.]+)/$',
                 ExportStatusView.as_view(),
+            ),
+
+            # ── Apply / Revert (Roof-S Phase A) ──────────────────────────
+            MountPoint(
+                'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/apply/$',
+                ApplyView.as_view(),
+            ),
+            MountPoint(
+                'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/apply-status/(?P<celery_task_id>[^/.]+)/$',
+                ApplyStatusView.as_view(),
+            ),
+            MountPoint(
+                'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/revert/$',
+                RevertView.as_view(),
             ),
         ]

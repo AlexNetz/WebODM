@@ -1,58 +1,635 @@
 # Plugin `realign` — Modell horizontal ausrichten & Files exportieren
 
-Dokumentation und Plan für das WebODM-Plugin `coreplugins/realign`. Setzt sich
-aus zwei Phasen zusammen:
+WebODM-Plugin `coreplugins/realign`. Zwei Phasen, **beide produktiv**:
 
-- **Phase 1 (umgesetzt):** Im 3D-Viewer 3 Punkte auf einer waagerechten Fläche
-  wählen, daraus eine 4×4-Korrekturmatrix berechnen, persistieren und beim
-  manuellen "Anwenden" auf Pointcloud + Mesh im Viewer wirken lassen.
-- **Phase 2 (geplant):** Auf Klick die transformierten LAZ- und GLB-Files
-  asynchron im Task-Asset-Ordner erzeugen und als Download anbieten — Basis
-  für den Roof-S-Import-Workflow.
+- **Phase 1:** 3-Punkt-Picker im 3D-Viewer berechnet eine 4×4-Korrekturmatrix,
+  speichert sie als `alignment_transform`-Eintrag im `project_data`-Plugin und
+  wendet sie auf manuellen Klick auf Pointcloud + Mesh im Viewer an.
+- **Phase 2:** Auf Klick erzeugt der Celery-Worker per PDAL und pygltflib
+  die ausgerichteten LAZ + GLB-Files im Task-Asset-Ordner. Diese können
+  einzeln heruntergeladen oder per HTTP-API von Roof-S abgerufen werden.
+
+Stand: Mai 2026 — End-to-End mit Roof-S-Integration verifiziert.
 
 ---
 
-## Phase 1 — Status & Architektur
+## Inhalt
 
-### Was umgesetzt ist
+1. [API-Übersicht (für Roof-S)](#api-übersicht-für-roof-s)
+2. [Workflow: Alignment-Matrix anlegen & exportieren](#workflow-alignment-matrix-anlegen--exportieren)
+3. [API-Referenz](#api-referenz)
+   - [Realign-Plugin-Endpunkte](#realign-plugin-endpunkte)
+   - [project_data-Plugin-Endpunkte (für Roof-S)](#project_data-plugin-endpunkte-für-roof-s)
+4. [TypeScript-Typen](#typescript-typen)
+5. [Roof-S Integration — Beispiel-Code](#roof-s-integration--beispiel-code)
+6. [Architektur & Mathematik](#architektur--mathematik)
+7. [Erkenntnisse aus der Implementierung](#erkenntnisse-aus-der-implementierung)
+8. [Deployment & Verifikation](#deployment--verifikation)
 
-- Plugin `coreplugins/realign` aktiv, Frontend baut, in Plugin-Liste sichtbar.
-- 3-Punkt-Picker im 3D-Viewer (über Potree `MeasuringTool` mit `maxMarkers=2` +
-  Polling auf `marker_dropped`).
-- Matrix wird per `computeAlignmentMatrix` aus den 3 Punkten berechnet:
-  Rotation um Centroid der gewählten Punkte (NICHT um Welt-Origin), optional
-  Z-Nullpunkt-Verschiebung.
-- Persistenz: neuer `entry_type: "alignment_transform"` im `project_data`-Plugin,
-  Schema in [`coreplugins/project_data/DataPlugin_API.md`](coreplugins/project_data/DataPlugin_API.md) dokumentiert.
-- Apply-Logik: direkte Matrix-Manipulation auf
-  `viewer.scene.scenePointCloud.children` (Pointclouds via `pcoGeometry`-Filter)
-  und `viewer.scene.scene.children` (Mesh + Camera-Marker, ohne Lichter).
-  `matrixAutoUpdate=false`, `frustumCulled=false`, `viewer.update`-Event-Hook
-  zwingt die Matrix bei jedem Frame zurück.
+---
 
-### Datenfluss
+## API-Übersicht (für Roof-S)
+
+Roof-S nutzt vier API-Gruppen:
+
+| Aufgabe | Endpunkte | Plugin |
+| --- | --- | --- |
+| Alignment-Matrix lesen / speichern | `GET/POST/PATCH/DELETE /api/plugins/project_data/project/{pid}/entries/` (mit `type=alignment_transform`) | `project_data` |
+| Export starten | `POST /api/plugins/realign/project/{pid}/tasks/{tid}/export/` | `realign` |
+| Export-Status pollen | `GET /api/plugins/realign/project/{pid}/tasks/{tid}/export/{celery_task_id}/` | `realign` |
+| Exportierte Files herunterladen | `GET /api/plugins/realign/project/{pid}/tasks/{tid}/export/download/{laz\|glb}/` | `realign` |
+| Dauerhaft anwenden (EPT regen + Swap) | `POST /api/plugins/realign/project/{pid}/tasks/{tid}/apply/` | `realign` |
+| Apply-Status pollen | `GET /api/plugins/realign/project/{pid}/tasks/{tid}/apply-status/{celery_task_id}/` | `realign` |
+| Original wiederherstellen | `POST /api/plugins/realign/project/{pid}/tasks/{tid}/revert/` | `realign` |
+
+Authentifizierung: wie überall in der WebODM-API entweder
+`Authorization: JWT <token>` (Cross-Origin) oder Session-Cookie mit `csrf.js`
+(Same-Origin im WebODM-UI).
+
+Berechtigung: jeder Endpunkt prüft Task-Zugriff über `TaskView.get_and_check_task`.
+Wer den Task nicht sehen darf, bekommt **404** (WebODM-Konvention, nicht 403).
+
+---
+
+## Workflow: Alignment-Matrix anlegen & exportieren
 
 ```text
-[ModelView.jsx, Core, unverändert]
+[1] User öffnet Task in WebODM, klickt im Viewer auf das Waage-Icon
+    → Realign-Panel öffnet sich
+
+[2] User wählt 3 Punkte auf einer waagerechten Fläche
+    → Frontend berechnet 4×4-Matrix (Rotation um Centroid)
+
+[3] User klickt "Speichern"
+    → POST /api/plugins/project_data/project/{pid}/entries/
+      body: { entry_type: "alignment_transform", task, data: {points, matrix, options, enabled} }
+    → Eintrag persistiert in project_data
+
+[4] User klickt "Modell exportieren"
+    → POST /api/plugins/realign/project/{pid}/tasks/{tid}/export/
+      body: { matrix: number[16] }
+    → Antwort: { celery_task_id: "..." }
+
+[5] Frontend pollt alle 2 s:
+    → GET /api/plugins/realign/project/{pid}/tasks/{tid}/export/{celery_task_id}/
+    → Antwort: { ready, status, progress, output? }
+    → Bei progress=100: Download-Links sichtbar
+
+[6] Download:
+    → GET .../export/download/laz/  →  FileResponse model_realigned.laz
+    → GET .../export/download/glb/  →  FileResponse model_realigned.glb
+```
+
+**Für Roof-S verkürzt:** Schritt 4–6 (3-Punkt-Picker passiert in WebODM). Wenn
+Roof-S nur einen bereits ausgerichteten Task konsumiert, reicht ein direkter
+Aufruf an die Download-Endpoints — vorausgesetzt der Export wurde mindestens
+einmal gestartet.
+
+---
+
+## API-Referenz
+
+### Realign-Plugin-Endpunkte
+
+Alle Pfade unter Plugin-Namespace `/api/plugins/realign/`. URL-Pattern aus
+[`coreplugins/realign/plugin.py`](coreplugins/realign/plugin.py).
+
+#### `POST .../project/{project_pk}/tasks/{pk}/export/`
+
+Startet den Export-Celery-Task. Synchroner Aufruf, kehrt sofort mit
+`celery_task_id` zurück.
+
+**Request Body** (`application/json`):
+
+```json
+{ "matrix": [m00, m10, m20, m30, m01, m11, m21, m31, m02, m12, m22, m32, m03, m13, m23, m33] }
+```
+
+Genau 16 Zahlen, **column-major** (Three.js `Matrix4.toArray()`-Format).
+Die Matrix wird gegen die Original-LAZ angewendet (PDAL `filters.transformation`)
+und gegen das Original-GLB (Node-Level-Matrix im GLTF-Scene-Graph).
+
+**Erfolg (200):**
+
+```json
+{ "celery_task_id": "abc-1234-..." }
+```
+
+**Fehler:**
+
+| Status | Bedingung |
+| --- | --- |
+| `400` | `matrix` fehlt, ist keine Liste, hat nicht 16 Einträge oder enthält keine validen Zahlen |
+| `404` | Task nicht gefunden ODER keine Punktwolke (LAZ/LAS) für Task vorhanden |
+| `500` | Celery konnte den Task nicht queuen |
+
+Hinweise:
+
+- Der `geo_offset` (UTM-Verschiebung des Modells) wird serverseitig aus
+  `coords.txt` gelesen — Roof-S muss nichts dafür tun.
+- Wenn das Task kein GLB hat, läuft der Export trotzdem (nur LAZ).
+
+#### `GET .../project/{project_pk}/tasks/{pk}/export/{celery_task_id}/`
+
+Pollt den Status des Celery-Tasks. Lange laufende Exporte können einige
+Sekunden bis ein paar Minuten dauern (je nach Pointcloud-Größe).
+
+**Antwort während Lauf (200):**
+
+```json
+{ "ready": false, "status": "PROGRESS", "progress": 50 }
+```
+
+`status` ist entweder ein Celery-State (`PENDING`, `STARTED`, `PROGRESS`) oder
+eine Plugin-Statusmeldung aus dem Worker (`"Starte LAZ-Export…"`,
+`"LAZ fertig, starte GLB-Export…"`, `"Fertig"`). `progress` ist `0..100`.
+
+**Antwort bei Erfolg (200):**
+
+```json
+{
+  "ready": true,
+  "status": "SUCCESS",
+  "progress": 100,
+  "output": {
+    "laz_url": "/api/plugins/realign/project/{pid}/tasks/{tid}/export/download/laz/",
+    "glb_url": "/api/plugins/realign/project/{pid}/tasks/{tid}/export/download/glb/"
+  }
+}
+```
+
+`output.glb_url` fehlt, wenn das Task kein Textured-Model hatte.
+
+**Antwort bei Fehler (200, mit `status: "FAILURE"`):**
+
+```json
+{ "ready": true, "status": "FAILURE", "error": "Beschreibung..." }
+```
+
+#### `GET .../project/{project_pk}/tasks/{pk}/export/download/{kind}/`
+
+Lädt eine der exportierten Dateien herunter. `kind` ∈ `laz | glb`.
+
+**Erfolg:** `FileResponse` mit `Content-Disposition: attachment; filename="model_realigned.laz"`
+(bzw. `.glb`). Content-Type `application/octet-stream`.
+
+**Fehler:**
+
+| Status | Bedingung |
+| --- | --- |
+| `400` | `kind` ist weder `laz` noch `glb` |
+| `404` | Task nicht gefunden ODER Datei wurde noch nicht exportiert |
+
+Roof-S kann diesen Endpoint direkt als `<a href>`-Download oder per
+`fetch().then(r => r.blob())` konsumieren.
+
+#### `POST .../project/{project_pk}/tasks/{pk}/apply/`
+
+Wendet die realignten Files **dauerhaft** auf den Task an: Regeneriert das
+Entwine-Octree aus der realignten LAZ, sichert die Originale und tauscht
+die Asset-Dateien. Nach erfolgreichem Apply rendert WebODM/Roof-S das Modell
+ohne Live-Matrix-Apply horizontal — auch nach Page-Reload.
+
+Voraussetzung: `Export` muss vorher gelaufen sein (Datei `realigned/model_realigned.laz`
+muss existieren). Andernfalls **400**.
+
+Ablauf im Celery-Worker:
+
+1. `entwine build -i realigned/model_realigned.laz -o realigned/entwine_pointcloud/`
+2. Beim **ersten** Apply: Backup anlegen — `entwine_pointcloud/` →
+   `entwine_pointcloud_original/`, `odm_textured_model_geo.glb` →
+   `odm_textured_model_geo.original.glb`. Bei wiederholtem Apply (nach
+   neuem Export) werden die zuvor angewendeten Dateien verworfen, das
+   Backup bleibt unangetastet.
+3. Move des neu erzeugten EPT auf den Ziel-Pfad, Copy der realignten GLB.
+4. `project_data` alignment_transform: `data.applied = true`.
+
+**Request Body:** leer (Matrix wird aus den Files genommen).
+
+**Erfolg (200):**
+
+```json
+{ "celery_task_id": "abc-1234-..." }
+```
+
+**Fehler:**
+
+| Status | Bedingung |
+| --- | --- |
+| `400` | `realigned/model_realigned.laz` existiert nicht (Export wurde nie ausgeführt) |
+| `404` | Task nicht gefunden |
+| `500` | Celery konnte den Task nicht queuen |
+
+Laufzeit: 30 s bis mehrere Minuten (abhängig von Punktwolken-Größe — wegen
+EPT-Generierung). Frontend MUSS pollen.
+
+#### `GET .../project/{project_pk}/tasks/{pk}/apply-status/{celery_task_id}/`
+
+Pollt den Status des Apply-Tasks. Antwort identisch zu `export/{id}/`,
+nur ohne `output` (es gibt keine zusätzlichen Downloads).
+
+**Antwort während Lauf (200):**
+
+```json
+{ "ready": false, "status": "Erzeuge Entwine-Octree…", "progress": 5 }
+```
+
+`progress` durchläuft: `5 → 60 → 80 → 95 → 100`.
+
+**Antwort bei Erfolg (200):**
+
+```json
+{ "ready": true, "status": "SUCCESS", "progress": 100 }
+```
+
+Nach `ready: true` sollte das Roof-S-Frontend den eingebetteten WebODM-Viewer
+neu laden (z.B. iframe.src neu setzen), damit die neuen EPT-Tiles geladen werden.
+
+#### `POST .../project/{project_pk}/tasks/{pk}/revert/`
+
+**Synchron** (rename-only, keine schwere Last). Stellt die Original-Dateien
+aus den Backups wieder her:
+
+- `entwine_pointcloud_original/` → `entwine_pointcloud/`
+- `odm_textured_model_geo.original.glb` → `odm_textured_model_geo.glb`
+- `project_data` alignment_transform: `data.applied = false`
+
+**Request Body:** leer.
+
+**Erfolg (200):**
+
+```json
+{ "ok": true }
+```
+
+**Fehler:**
+
+| Status | Bedingung |
+| --- | --- |
+| `404` | Task nicht gefunden ODER kein Backup vorhanden (Apply wurde nie ausgeführt) |
+| `500` | Filesystem-Fehler beim Rename |
+
+Nach Revert sollte das Frontend ebenfalls den Viewer neu laden.
+
+### project_data-Plugin-Endpunkte (für Roof-S)
+
+Diese Endpunkte gehören zum `project_data`-Plugin, sind aber für Roof-S
+relevant zum Lesen der gespeicherten Alignment-Matrix (z.B. wenn Roof-S das
+Modell nochmal live anzeigen will statt den Export zu verwenden).
+
+Komplette Doku in
+[`coreplugins/project_data/DataPlugin_API.md`](coreplugins/project_data/DataPlugin_API.md).
+
+Kurzfassung für `entry_type: "alignment_transform"`:
+
+#### `GET /api/plugins/project_data/project/{project_pk}/entries/?type=alignment_transform&task={task_id}`
+
+Liefert das Alignment-Eintrag (max. 1 pro Task — die Speichern-Logik im Plugin
+PATCHt einen vorhandenen Eintrag statt einen neuen anzulegen).
+
+**Antwort (Array, evtl. leer):**
+
+```json
+[
+  {
+    "id": "uuid-...",
+    "project": "project-uuid",
+    "task": "task-uuid",
+    "entry_type": "alignment_transform",
+    "title": "Alignment Transform",
+    "content": "",
+    "data": {
+      "points": [
+        [518823.53, 5370580.01, 420.80],
+        [518827.03, 5370587.37, 420.78],
+        [518827.20, 5370582.29, 420.91]
+      ],
+      "matrix": [/* 16 floats, column-major */],
+      "options": { "reset_z_to_zero": false },
+      "enabled": true
+    },
+    "created_at": "2026-05-11T17:38:50Z",
+    "updated_at": "2026-05-11T17:38:50Z"
+  }
+]
+```
+
+Felder im `data`-Objekt:
+
+| Feld | Typ | Bedeutung |
+| --- | --- | --- |
+| `points` | `[x, y, z][]` (genau 3) | UTM-Koordinaten der vom User gewählten Picker-Punkte |
+| `matrix` | `number[16]` | 4×4-Matrix, column-major (Three.js-Format) |
+| `options.reset_z_to_zero` | `boolean` | wenn `true`, wurde Z-Nullpunkt auf die gewählte Ebene gesetzt |
+| `enabled` | `boolean` | UI-Zustand zum Zeitpunkt des Speicherns (Toggle "Aktiv") — Frontend-Hint, kein Server-State |
+| `applied` | `boolean` (optional) | gesetzt vom `apply/`/`revert/`-Endpoint: `true` wenn EPT/GLB im Task aktuell die realignten Versionen sind, `false` nach `revert/`. Fehlt bei Tasks, auf die nie `apply/` aufgerufen wurde |
+
+---
+
+## TypeScript-Typen
+
+Für Roof-S (TypeScript):
+
+```ts
+// ─── Realign Plugin ──────────────────────────────────────────────────────────
+
+export type RealignExportStart = { matrix: number[] };   // length 16
+
+export type RealignExportStartResponse = { celery_task_id: string };
+
+export type RealignExportStatus =
+  | { ready: false; status: string; progress: number }
+  | {
+      ready: true;
+      status: "SUCCESS";
+      progress: 100;
+      output: { laz_url: string; glb_url?: string };
+    }
+  | { ready: true; status: "FAILURE"; error: string };
+
+export type RealignApplyStartResponse = { celery_task_id: string };
+
+export type RealignApplyStatus =
+  | { ready: false; status: string; progress: number }
+  | { ready: true; status: "SUCCESS"; progress: 100 }
+  | { ready: true; status: "FAILURE"; error: string };
+
+export type RealignRevertResponse = { ok: true };
+
+// ─── Alignment Transform Entry (via project_data) ────────────────────────────
+
+export interface AlignmentTransformData {
+  points: [number, number, number][];   // exactly 3
+  matrix: number[];                     // length 16, column-major
+  options: { reset_z_to_zero: boolean };
+  enabled: boolean;
+  applied?: boolean;                    // set by realign /apply or /revert
+}
+
+export interface AlignmentTransformEntry {
+  id: string;
+  project: string;
+  task: string;
+  entry_type: "alignment_transform";
+  title: string;
+  content: string;
+  data: AlignmentTransformData;
+  created_at: string;
+  updated_at: string;
+}
+```
+
+---
+
+## Roof-S Integration — Beispiel-Code
+
+### Variante A: Realigned Files direkt herunterladen
+
+```ts
+async function downloadRealignedAssets(
+  apiBase: string,           // z.B. "https://odm.netz-montageserver.de"
+  jwt: string,
+  projectId: string,
+  taskId: string,
+): Promise<{ laz: Blob; glb: Blob | null }> {
+  const authH = { Authorization: `JWT ${jwt}` };
+  const base = `${apiBase}/api/plugins/realign/project/${projectId}/tasks/${taskId}/export`;
+
+  // LAZ holen
+  const lazRes = await fetch(`${base}/download/laz/`, { headers: authH });
+  if (!lazRes.ok) throw new Error(`LAZ download failed: ${lazRes.status}`);
+  const laz = await lazRes.blob();
+
+  // GLB holen (kann 404 sein wenn Task kein Textured Model hatte)
+  const glbRes = await fetch(`${base}/download/glb/`, { headers: authH });
+  const glb = glbRes.ok ? await glbRes.blob() : null;
+
+  return { laz, glb };
+}
+```
+
+### Variante B: Export anstossen + Status pollen
+
+Falls Roof-S den Export selbst triggern soll (z.B. weil das WebODM-Frontend
+nicht durchlaufen wurde):
+
+```ts
+async function triggerAndWaitExport(
+  apiBase: string,
+  jwt: string,
+  projectId: string,
+  taskId: string,
+  matrix: number[],          // length 16, column-major
+): Promise<{ lazUrl: string; glbUrl?: string }> {
+  const authH = {
+    Authorization: `JWT ${jwt}`,
+    "Content-Type": "application/json",
+  };
+  const base = `${apiBase}/api/plugins/realign/project/${projectId}/tasks/${taskId}/export`;
+
+  // 1. Start
+  const startRes = await fetch(`${base}/`, {
+    method: "POST",
+    headers: authH,
+    body: JSON.stringify({ matrix }),
+  });
+  if (!startRes.ok) {
+    const err = await startRes.json().catch(() => ({}));
+    throw new Error(`Export start failed: ${err.error || startRes.status}`);
+  }
+  const { celery_task_id } = (await startRes.json()) as RealignExportStartResponse;
+
+  // 2. Poll bis ready
+  while (true) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const statusRes = await fetch(`${base}/${celery_task_id}/`, { headers: authH });
+    if (!statusRes.ok) throw new Error(`Status fetch failed: ${statusRes.status}`);
+    const st = (await statusRes.json()) as RealignExportStatus;
+
+    if (!st.ready) continue;
+    if (st.status === "FAILURE") throw new Error(`Export fehlgeschlagen: ${st.error}`);
+
+    return {
+      lazUrl: `${apiBase}${st.output.laz_url}`,
+      glbUrl: st.output.glb_url ? `${apiBase}${st.output.glb_url}` : undefined,
+    };
+  }
+}
+```
+
+### Variante C: Gespeicherte Matrix lesen statt Export
+
+Wenn Roof-S das Modell live transformieren will (statt die exportierten Files
+zu nutzen), kann es die Matrix direkt aus `project_data` lesen:
+
+```ts
+async function loadAlignmentMatrix(
+  apiBase: string,
+  jwt: string,
+  projectId: string,
+  taskId: string,
+): Promise<number[] | null> {
+  const url = new URL(
+    `${apiBase}/api/plugins/project_data/project/${projectId}/entries/`,
+  );
+  url.searchParams.set("type", "alignment_transform");
+  url.searchParams.set("task", taskId);
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `JWT ${jwt}` },
+  });
+  if (!res.ok) return null;
+  const entries: AlignmentTransformEntry[] = await res.json();
+  return entries.length > 0 ? entries[0].data.matrix : null;
+}
+
+// Anwendung im Three.js-Viewer:
+const matrix = await loadAlignmentMatrix(apiBase, jwt, projectId, taskId);
+if (matrix) {
+  const M = new THREE.Matrix4().fromArray(matrix);     // accepts column-major
+  modelGroup.applyMatrix4(M);
+}
+```
+
+### Variante D: Persistent anwenden ohne neuen Task
+
+Statt die Files herunterzuladen und in einem neuen Task zu importieren, kann
+Roof-S sie **direkt im bestehenden WebODM-Task verankern**. Damit erscheint
+das Modell nach Page-Reload automatisch horizontal — ohne Live-Matrix-Apply.
+
+```ts
+async function applyRealignment(
+  apiBase: string,
+  jwt: string,
+  projectId: string,
+  taskId: string,
+): Promise<void> {
+  const authH = { Authorization: `JWT ${jwt}`, "Content-Type": "application/json" };
+  const base = `${apiBase}/api/plugins/realign/project/${projectId}/tasks/${taskId}`;
+
+  // 1. Apply triggern (setzt voraus, dass Export schon gelaufen ist)
+  const startRes = await fetch(`${base}/apply/`, { method: "POST", headers: authH });
+  if (!startRes.ok) {
+    const err = await startRes.json().catch(() => ({}));
+    throw new Error(`Apply failed: ${err.error || startRes.status}`);
+  }
+  const { celery_task_id } = (await startRes.json()) as RealignApplyStartResponse;
+
+  // 2. Polling
+  while (true) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const statusRes = await fetch(
+      `${base}/apply-status/${celery_task_id}/`,
+      { headers: authH },
+    );
+    if (!statusRes.ok) throw new Error(`Status fetch failed: ${statusRes.status}`);
+    const st = (await statusRes.json()) as RealignApplyStatus;
+
+    if (!st.ready) continue;
+    if (st.status === "FAILURE") throw new Error(`Apply fehlgeschlagen: ${st.error}`);
+    return;   // ready === true, status === SUCCESS
+  }
+}
+
+async function revertRealignment(
+  apiBase: string,
+  jwt: string,
+  projectId: string,
+  taskId: string,
+): Promise<void> {
+  const res = await fetch(
+    `${apiBase}/api/plugins/realign/project/${projectId}/tasks/${taskId}/revert/`,
+    { method: "POST", headers: { Authorization: `JWT ${jwt}` } },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(`Revert failed: ${err.error || res.status}`);
+  }
+}
+```
+
+Nach `apply()` und `revert()` muss das Roof-S-Frontend den eingebetteten
+Viewer (iframe) neu laden, damit die neuen EPT-Tiles und das neue GLB
+geladen werden:
+
+```ts
+function reloadViewer(iframe: HTMLIFrameElement) {
+  const src = iframe.src;
+  iframe.src = "";
+  setTimeout(() => { iframe.src = src; }, 50);
+}
+```
+
+### Welche Variante wählen?
+
+| Use-Case | Variante |
+| --- | --- |
+| Roof-S erzeugt einen neuen Task aus den ausgerichteten Files | **A** — Files herunterladen, in Roof-S-eigene Pipeline importieren |
+| Roof-S triggert Ausrichtung selbst (z.B. eigenes Picker-UI) | **B** — Matrix erzeugen, POST Export, downloaden |
+| Roof-S zeigt WebODM-Task live und ausgerichtet, ohne neue Files zu erzeugen | **C** — Matrix lesen, im Viewer applyen |
+| Roof-S soll den bestehenden Task dauerhaft horizontal machen (auch nach Reload) | **D** — Export + Apply, dann Viewer-Reload |
+
+Roof-S verwendet aktuell **Variante D** (Picker + Save in WebODM, Export +
+Apply trigger über Roof-S-UI).
+
+---
+
+## Architektur & Mathematik
+
+### Datenfluss Phase 1 (UI)
+
+```text
+[ModelView.jsx (Core, unverändert)]
    │ initialisiert Potree.Viewer + lädt Pointcloud + Mesh
    ▼
 [realign/public/main.js]
-   - hookt PluginsAPI.ModelView.addActionButton (sync register, kein deps-Array)
-   - lädt realign/build/app.js parallel via SystemJS.import
+   - synchrone Registrierung PluginsAPI.ModelView.addActionButton
+     (KEIN deps-Array — Race-Condition-Workaround, siehe Erkenntnis #3)
+   - parallel SystemJS.import('realign/build/app.js')
    ▼
 [realign/public/app.jsx]
-   - UI: Waage-Button + Modal mit 3-Punkt-Picker, Toggle, Save, Reset, Export
-   - Mathe: 3 Punkte → 4×4-Matrix (Three.js)
+   - UI: Waage-Button + Modal (3-Punkt-Picker, Toggle, Save, Reset, Export)
+   - Math: 3 Punkte → 4×4-Matrix (Three.js)
    - Persistenz: GET/POST/PATCH/DELETE über project_data-API
-   - Apply: direkte Matrix-Schreibung auf scenePointCloud-Children + scene-Children
+   - Apply: direkte Matrix-Schreibung auf Potree-Scene-Children
+   - Export: POST realign/export → poll Status → Download-Buttons
+```
+
+### Datenfluss Phase 2 (Backend)
+
+```text
+POST /api/plugins/realign/.../export/
+   │ body: { matrix: [16 floats] }
+   ▼
+[realign/api.py: ExportView]
+   - Validiert Matrix
+   - Findet laz_path, glb_path
+   - Liest coords.txt → geo_offset = [X, Y] (UTM)
+   - run_function_async(_run_export_task, ..., with_progress=True)
+   ▼
+[realign/tasks.py: _run_export_task] (Celery worker)
+   1. M = numpy 4×4 aus dem column-major Array
+   2. M_local = T(-offset) · M · T(offset)   für GLB-Lokalkoordinaten
+   3. LAZ:  PDAL pipeline (filters.transformation mit M, row-major)
+            → output_dir/model_realigned.laz
+   4. GLB:  pygltflib.GLTF2.load(glb_path)
+            → für jeden Root-Scene-Node: node.matrix = M_local · existing
+            → gltf.save(out_glb)
+   ▼
+[realign/api.py: ExportStatusView] (vom Frontend gepollt)
+   → output: { laz_url, glb_url }
+   ▼
+[realign/api.py: ExportDownloadView]
+   → FileResponse(task.assets_path('realigned/model_realigned.{laz|glb}'))
 ```
 
 ### Mathematik
 
 ```js
+// app.jsx: computeAlignmentMatrix(p1, p2, p3, resetZ)
 const v1 = p2.clone().sub(p1);
 const v2 = p3.clone().sub(p1);
-const n = v1.cross(v2).normalize();
+const n  = v1.cross(v2).normalize();
 if (n.z < 0) n.negate();
 const up = new THREE.Vector3(0, 0, 1);
 const q  = new THREE.Quaternion().setFromUnitVectors(n, up);
@@ -60,9 +637,9 @@ const R  = new THREE.Matrix4().makeRotationFromQuaternion(q);
 
 const centroid = p1.clone().add(p2).add(p3).divideScalar(3);
 
-// Rotation um Centroid — kritisch bei UTM-Koordinaten (~518000, ~5370000):
-// Eine Rotation um Welt-Origin würde das Modell um (I-R)·c verschieben,
-// was bei kleinem R ≈ 1° bereits 100+ km Translation bedeutet.
+// Rotation um den Centroid — kritisch bei UTM-Koordinaten (~518000, ~5370000):
+// Eine Rotation um (0,0,0) ergäbe bei 1° Korrektur >100 km Translation,
+// das Modell wäre außerhalb jedes Frustums.
 const M = new THREE.Matrix4()
   .makeTranslation(centroid.x, centroid.y, centroid.z)
   .multiply(R)
@@ -73,379 +650,244 @@ if (resetZ) {
 }
 ```
 
-### Dateien
+`setFromUnitVectors(n, up)` erzeugt eine Rotation mit Achse = **n × (0,0,1)**.
+Die Achse liegt immer in der XY-Ebene → **keine Z-Rotation**. Die Himmelsrichtung
+des Gebäudes bleibt erhalten (kritisch für Roof-S).
 
-| Datei | Rolle |
-| --- | --- |
-| `coreplugins/realign/manifest.json` | Plugin-Metadaten |
-| `coreplugins/realign/__init__.py` | `from .plugin import *` |
-| `coreplugins/realign/plugin.py` | `include_js_files()`, `build_jsx_components()` |
-| `coreplugins/realign/public/main.js` | sync-Registrierung `addActionButton`, LazyLoader |
-| `coreplugins/realign/public/app.jsx` | React-UI, Mathe, Apply, Save |
-| `coreplugins/project_data/models.py` | `ALIGNMENT_TRANSFORM` in `ENTRY_TYPES` |
-| `coreplugins/project_data/DataPlugin_API.md` | Schema + Roof-S-Konsum-Snippet |
-| `docker-compose.override.yml` | Bind-Mount `./coreplugins/realign` |
+### Koordinatensysteme (das Verständnis-Problem)
+
+| System | Bereich (Beispiel) | Wer nutzt es |
+| --- | --- | --- |
+| **UTM (Welt)** | X≈518803-518834, Y≈5370572-5370600, Z≈416-432 | LAZ-File, Potree-Camera, Picker-Output |
+| **GLB-Lokal** | X≈-8 - +12, Y≈-12 - +9, Z=absolute (417-431) | GLB-Vertices (Draco) |
+| **EPT-Storage-Offset** | X+518818, Y+5370587, Z+424 | nur für Entwine-Integer-Kompression |
+| **coords.txt-Offset** | 518815, 5370589 | OBJ-Modell-Translate (WebODM-Standard) |
+
+Der Trick: Die Matrix M wird aus UTM-Picker-Koordinaten berechnet, muss aber
+fürs GLB in lokale Koordinaten umgerechnet werden:
+
+```text
+M_local = T(-geo_offset) · M · T(geo_offset)
+```
+
+Damit wirkt `M_local` auf einen lokalen Vertex `v` wie `M` auf seinen
+UTM-Welt-Vertex `v + offset`, das Ergebnis wieder lokalisiert. Für LAZ bleibt
+M unverändert (Pointcloud ist in UTM).
 
 ---
 
-## Phase 1 — Wichtige Erkenntnisse aus der Implementierung
+## Erkenntnisse aus der Implementierung
 
-Auflistung der Stolpersteine, die schmerzhaft gelernt wurden. Reihenfolge sortiert
-nach "wie schnell würde ich beim nächsten Mal darüber stolpern".
+Sortiert nach Wiederkehrwahrscheinlichkeit.
 
-### 1. `THREE` muss zur Laufzeit gelesen werden
+### 1. ODM exportiert GLB mit Draco-Kompression
 
-Mein `main.js` lädt das Modul via `SystemJS.import('realign/build/app.js')` sofort
-beim Page-Load (parallel, damit der `addActionButton`-Trigger nicht verpasst
-wird). Zu diesem Zeitpunkt ist `window.THREE` evtl. noch nicht vom Haupt-Bundle
-gesetzt. Ein `const THREE = window.THREE;` auf Top-Level des Moduls friert dann
-`undefined` fest. **Lösung:** `function getTHREE() { return window.THREE; }`
-und in jeder Funktion `const THREE = getTHREE();` lokal lesen.
+`extensionsUsed: ['KHR_draco_mesh_compression', 'KHR_materials_unlit']`. Accessor
+`bufferView` ist `None` (Daten stecken in der Draco-Extension), und ohne
+DracoPy/draco-CLI kann pygltflib die Vertices nicht lesen oder modifizieren.
 
-### 2. Plugin-Build-Webpack kennt `THREE` nicht als external
+**Lösung:** Statt Vertices zu transformieren, M als **GLTF-Node-Matrix** in den
+Scene-Graph schreiben. Der GLTF-Renderer (in WebODM/Roof-S/Cesium/modelviewer.dev)
+wendet die Matrix beim Rendern an, inklusive korrekter Normal-Transformation
+(inverse-transpose des Rotations-Anteils).
 
-Das Haupt-Webpack hat `externals: { "THREE": "THREE" }` (siehe
-`webpack.config.js:103`). Das Plugin-Template
-(`app/plugins/templates/webpack.config.js.tmpl`) listet `THREE` NICHT als
-external. Konsequenz: `import * as THREE from 'THREE'` knallt im Plugin-Build mit
-"Module not found". → `window.THREE` direkt nutzen, kein Import.
+### 2. GLB-Vertices sind in lokalen Koordinaten, M wird aus UTM-Koordinaten berechnet
 
-### 3. Race-Condition im `triggerAddActionButton`-Response-Listener
+ODM speichert die GLB-Vertices in einem lokalen Koordinatensystem
+(X, Y relativ zu `coords.txt`-Offset; Z absolut). Die Matrix M aus dem Picker
+basiert aber auf UTM-Koordinaten. Direktes Anwenden von M auf einen lokalen
+Vertex ergibt Translationen von ~100 km.
+
+**Lösung:** `geo_offset` aus `coords.txt` lesen, `M_local = T(-offset) · M · T(offset)`
+berechnen, **M_local** als Node-Matrix setzen. **M** (UTM) wird unverändert
+auf die LAZ angewendet, da die Pointcloud in UTM gespeichert ist.
+
+### 3. `THREE` muss zur Laufzeit gelesen werden
+
+`main.js` lädt das Modul via `SystemJS.import(...)` parallel zum
+addActionButton-Sync-Register. `window.THREE` ist zu diesem Zeitpunkt
+evtl. noch nicht vom Haupt-Bundle gesetzt. Ein `const THREE = window.THREE;`
+auf Top-Level würde `undefined` festfrieren.
+
+**Lösung:** `function getTHREE() { return window.THREE; }` und in jeder
+Funktion lokal lesen.
+
+### 4. Plugin-Build-Webpack kennt `THREE` nicht als external
+
+Haupt-Webpack hat `externals: { "THREE": "THREE" }`, das Plugin-Template
+([`app/plugins/templates/webpack.config.js.tmpl`](app/plugins/templates/webpack.config.js.tmpl))
+nicht. `import * as THREE from 'THREE'` knallt mit "Module not found" im
+Plugin-Build. → Immer `window.THREE` direkt nutzen.
+
+### 5. Race im `triggerAddActionButton`-Listener
 
 [`app/static/app/js/classes/plugins/ApiFactory.js:69-79`](app/static/app/js/classes/plugins/ApiFactory.js#L69-L79):
-der Listener entfernt sich nach `setTimeout(0)` selbst. Plugins, die ihre
-Dependencies via `addActionButton(['deps'], cb)` async laden, kommen mit ihrem
-Response evtl. zu spät — Listener ist dann schon weg, ihr Button verschwindet.
+der Response-Listener entfernt sich nach `setTimeout(0)` selbst. Plugins mit
+`addActionButton(['deps'], cb)` (async dep-load) verpassen ihn.
 
-**Lösung im main.js:** `addActionButton` **synchron ohne `deps`-Array**
-registrieren. Das Modul wird im main.js parallel via `SystemJS.import` geladen,
-und im Sync-Callback wird entweder direkt das geladene Modul verwendet oder ein
-LazyLoader-Wrapper geliefert.
+**Lösung in main.js:** `addActionButton` **synchron ohne `deps`-Array**
+registrieren. Modul parallel via `SystemJS.import` laden. Sync-Callback
+liefert entweder direkt das Modul oder einen LazyLoader-Wrapper.
 
-### 4. Korrekte Property-Namen in Potree
+### 6. Korrekte Property-Namen in Potree
 
-- `viewer.scene.scenePointCloud` — **mit großem `C`, ohne `s` am Ende**.
-  `scenePointclouds` (mit `s` oder `c`) existiert nicht.
-- Pointcloud-Identifikation: `obj.pcoGeometry !== undefined` (PointCloudOctree
-  hat das Property, andere Children der `scenePointCloud`-Scene wie
-  `referenceFrame` oder Lichter haben es nicht).
-- Mess-Marker liegen in `viewer.scene.measuringTool.scene` (separate Three.js
-  Scene), nicht in `viewer.scene.scene`.
+- `viewer.scene.scenePointCloud` — großes `C`, kein `s` am Ende.
+- Pointcloud-Identifikation: `obj.pcoGeometry !== undefined`.
+- Mess-Marker liegen in `viewer.scene.measuringTool.scene` (separate Scene).
 
-### 5. Potree `MeasuringTool`-Picking braucht `maxMarkers >= 2`
+### 7. Potree `MeasuringTool` braucht `maxMarkers >= 2`
 
-`viewer.measuringTool.startInsertion({maxMarkers: 1})` hängt **keinen
-`mouseup`-Listener an** (siehe `potree.js:68655`: `if (measure.maxMarkers > 1)`).
-Der initiale Marker bleibt als schwebender Cursor bei (0,0,0) hängen — kein
-Klick wird erfasst.
+`startInsertion({maxMarkers: 1})` hängt **keinen `mouseup`-Listener** an —
+der initiale Marker bleibt als schwebender (0,0,0)-Cursor hängen. Mit
+`maxMarkers: 2` setzt der erste Klick `points[0]`, `points[1]` ist der
+Vorschau-Marker.
 
-**Lösung:** `maxMarkers: 2`. Erster Klick fixiert `points[0]`, `points[1]` ist
-der neue Vorschau-Marker, den wir nach dem `marker_dropped`-Event mit
-`removeMarker(1)` selbst entfernen.
+Korrektes Event: **`marker_dropped`** (Mouseup nach Drag), nicht `marker_added`
+(feuert auch für initialen 0,0,0-Marker).
 
-Das richtige Event ist **`marker_dropped`** (feuert beim Mouseup nach Drag),
-nicht `marker_added` (feuert auch für den initialen 0,0,0-Marker).
-Implementiert mit 50 ms Delay + Polling-Fallback.
+### 8. Auto-Apply (in Phase 1) ist deaktiviert
 
-### 6. Rotation um Centroid, nicht um Welt-Origin
+Potree manipuliert `pointcloud.position` mehrfach in den ersten Sekunden
+nach Load. Jeder Auto-Apply wird überschrieben. **Manueller Klick** auf
+"Anwenden" funktioniert (Potree-Init ist dann durch).
 
-Bei UTM-Koordinaten (~518000, ~5370000) ergäbe eine Rotation um (0,0,0) bei
-nur 1° Korrektur eine Translation von >90 km. Modell wäre außerhalb jedes
-Frustums. Lösung: `M = T(c)·R·T(-c)` mit `c = centroid` der drei gewählten
-Punkte.
+### 9. WebODM rebuilt JSX nur wenn `build/` fehlt
 
-### 7. Auto-Apply ist deaktiviert
-
-Beim Page-Load durchläuft Potree mehrere Phasen, in denen `pointcloud.position`
-mehrfach manipuliert wird (Constructor mit `geometry.offset`, später
-`Potree.loadProject` Hook auf `viewer.update`). Jeder Apply-Versuch innerhalb
-dieser Phase wird überschrieben.
-
-**Sichtbares Symptom:** Pointcloud verschwindet — `quaternion` bleibt
-unsere Rotation, `position` wird auf (0,0,0) zurückgesetzt. Rotation um Origin
-katapultiert die Pointcloud km-weit weg.
-
-Versuchte Workarounds (alle nicht zuverlässig):
-
-- `matrixAutoUpdate = false` mit `obj.matrix.copy(M)` — Potree resetet trotzdem.
-- `viewer.update`-Event-Hook mit Force-Pose pro Frame — Race bleibt.
-- Wrapper-Group, die die Pointcloud in eine eigene Group packt — wurde aus
-  unklarem Grund nicht angewendet (`hasWrapper: false` im DevTools-Test).
-- 15 s setTimeout nach `pointcloud_added`-Event — Modell verschwindet trotzdem
-  nach genau 15 s.
-
-**Aktueller Stand:** `RealignController.loadFromBackend` lädt nur die Daten,
-ruft `applyMatrix` **nicht** auf. State im Panel wird mit
-`enabled: ctrl.applied` hydratiert (effektiv immer `false`). User klickt
-einmal pro Session manuell "Anwenden".
-
-Saubere Lösung für später: Patch in
-[`app/static/app/js/ModelView.jsx:464`](app/static/app/js/ModelView.jsx#L464)
-direkt nach dem `Potree.loadProject(viewer, sceneData)`-Aufruf — dort ist
-Potrees Init garantiert durch. Aber Core-Patch, muss bei Upstream-Merges
-mitgeführt werden.
-
-### 8. Cloudflare-Cache vor `build/app.js`
-
-Cloudflare cached `.js`-Files standardmäßig. Nach jedem Plugin-Build:
-**Cache für `build/app.js` und `main.js` purgen** oder Cache-Buster `?v=N`
-zum Verifizieren benutzen. Sonst lädt der Browser den alten Build und
-Diagnose-Output ist irreführend.
-
-### 9. WebODM rebuilt nur, wenn `build/` fehlt
-
-[`app/plugins/functions.py:132`](app/plugins/functions.py#L132):
-`elif not plugin.path_exists("public/build")` — Plugin-Webpack-Build läuft
-nur, wenn das `build/`-Verzeichnis nicht existiert. Bei Source-Änderungen am
-`app.jsx` also vor dem Container-Restart:
+[`app/plugins/functions.py:132`](app/plugins/functions.py#L132). Bei
+`app.jsx`-Änderungen also vor Container-Restart das `build/`-Verzeichnis löschen:
 
 ```bash
 docker exec webapp rm -rf /webodm/coreplugins/realign/public/build
-docker compose restart webapp
+docker exec webapp kill -HUP $(docker exec webapp pgrep -f gunicorn | head -1)
 ```
 
-### 10. Mount NICHT `:ro` für Plugins mit jsx-Build
+Wenn der automatische Build via Gunicorn-Reload nicht durchläuft (Race mit
+mehreren Workern), den Build manuell starten:
 
-WebODM schreibt eine generierte `webpack.config.js` in `public/`. Mit
-`:ro`-Mount → `OSError: Read-only file system`. Override-Mount für `realign`
-muss **schreibbar** sein:
+```bash
+docker exec webapp bash -c "cd /webodm/coreplugins/realign/public && webpack-cli"
+```
+
+### 10. Mount NICHT `:ro` für JSX-Build-Plugins
+
+WebODM schreibt eine generierte `webpack.config.js` in `public/`. Mit `:ro`-Mount
+gibt es `OSError: Read-only file system`. In
+[`docker-compose.override.yml`](docker-compose.override.yml):
 
 ```yaml
-- ./coreplugins/realign:/webodm/coreplugins/realign
+- ./coreplugins/realign:/webodm/coreplugins/realign     # ohne :ro
 ```
 
-`build/`, `node_modules/` und `webpack.config.js` werden ohnehin gitignored
-(globale `.gitignore` regelt das).
+### 11. `pygltflib` muss im Worker-Container installiert sein
+
+Der Plugin-Code läuft via `run_function_async` im Celery-Worker. Im
+[`docker-compose.override.yml`](docker-compose.override.yml) wird `pygltflib`
+beim Worker-Start installiert:
+
+```yaml
+worker:
+  entrypoint: /bin/bash -c "pip install laspy pygltflib -q && ..."
+```
+
+Beim ersten Boot dauert das ~10 s. Logs prüfen: `docker logs worker | head -20`.
+
+### 12. `entwine`-Binary muss im Worker-Container verfügbar sein
+
+Für `POST /apply/` ruft der Worker `entwine build -i ... -o ...` per
+`subprocess` auf. ODM nutzt EPT zwar schon zur EPT-Erzeugung beim
+Task-Processing, aber das Binary könnte trotzdem fehlen oder in einem
+anderen Pfad liegen.
+
+Vor erstem Apply-Test prüfen:
+
+```bash
+docker exec worker which entwine
+docker exec worker entwine --help 2>&1 | head -5
+```
+
+Falls das Binary fehlt: Install-Hook in `docker-compose.override.yml`
+analog zu pygltflib ergänzen, oder per Conda/apt nachinstallieren.
+
+### 13. Cloudflare cached `build/app.js`
+
+Nach Plugin-Updates Cache purgen oder per `?v=N`-Buster testen.
 
 ---
 
-## Phase 2 — Export der ausgerichteten Files (TODO)
+## Deployment & Verifikation
 
-### Kontext
+### Plugin-Code-Änderungen deployen
 
-Vermarktungs-Workflow für Roof-S:
+Backend-only (api.py, tasks.py, plugin.py):
 
-1. Drohnenaufnahmen (Kunde oder selbst)
-2. Modell rechnen — lokal auf großem Rechner oder via WebODM Lightning
-3. In WebODM säubern + ausrichten (Phase 1)
-4. **Ausgerichtete LAZ + GLB exportieren (Phase 2)**
-5. In Roof-S als neuen Task importieren (Roof-S baut Octree selbst beim Import)
-6. Kunde erhält Zugang über Roof-S
-
-Roof-S bekommt damit fertig ausgerichtete Files, kein Live-Matrix-Apply nötig.
-Das ist insbesondere deshalb wichtig, weil Live-Apply in Phase 1 fragil ist
-(siehe Erkenntnis #7).
-
-### Architektur
-
-```text
-[Modal "Modell exportieren"-Button]
-   │ POST /api/plugins/realign/projects/{pid}/tasks/{tid}/export/
-   │ body: {matrix: [16 floats]}
-   ▼
-[realign/api.py: ExportView]
-   │ run_function_async(_run_export_task, ..., with_progress=True)
-   ▼
-[realign/tasks.py: _run_export_task]
-   1. PDAL: filters.transformation auf georeferenced_model.laz
-   2. pygltflib + numpy: GLB-Vertices transformieren (CESIUM_RTC einbacken!)
-   3. Output nach task.assets_path('realigned/')
-   ▼
-[Frontend pollt GET .../export/{celery_task_id}/]
-   │ bei done: Download-Links anzeigen
-   ▼
-[Download-View liefert FileResponse aus task.assets_path('realigned/...')]
+```bash
+cd ~/WebODM
+git fetch myfork && git reset --hard myfork/master
+docker exec webapp kill -HUP $(docker exec webapp pgrep -f gunicorn | head -1)
 ```
 
-Pattern direkt von `coreplugins/roof_detect/` gespiegelt (Detect/Status/Result).
+Worker liest `tasks.py` zur Laufzeit via `inspect.getsource()` neu — kein
+Worker-Restart nötig.
 
-### Backend
-
-#### `coreplugins/realign/api.py` (neu)
-
-Drei `TaskView`-basierte Views:
-
-- **`ExportView` (POST)** — Body: `{matrix: number[16]}`. Validiert Matrix,
-  ermittelt LAZ + GLB-Pfade über `task.assets_path()` mit den `ASSETS_MAP`-Keys
-  (`georeferenced_model.laz`, `textured_model.glb`), startet
-  `run_function_async(_run_export_task, laz_path, glb_path, matrix, output_dir,
-  with_progress=True)`. Antwort: `{celery_task_id}`.
-- **`ExportStatusView` (GET)** mit `celery_task_id` — pollt
-  `TestSafeAsyncResult(celery_task_id)`. Antwort:
-  `{ready: bool, status: 'progress'|'done'|'failed', progress: 0..100,
-  output: {laz_url, glb_url}}`. URLs zeigen auf die Download-View.
-- **`ExportDownloadView` (GET)** mit `kind ∈ {laz, glb}` — `FileResponse` mit
-  `as_attachment=True` aus `task.assets_path('realigned/...')`. Vorlage:
-  `coreplugins/roof_detect/api.py: CADMeshView`.
-
-URL-Routen in `coreplugins/realign/plugin.py`:
-
-```python
-'projects/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/export/$'
-'projects/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/export/(?P<celery_task_id>[^/.]+)/$'
-'projects/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/export/download/(?P<kind>laz|glb)/$'
-```
-
-#### `coreplugins/realign/tasks.py` (neu)
-
-```python
-def _run_export_task(laz_path, glb_path, matrix, output_dir, progress_callback=None):
-    import os, json, subprocess, tempfile
-    import numpy as np, pygltflib
-
-    # Matrix ist column-major (THREE.Matrix4.toArray); für PDAL/numpy in row-major
-    M = np.asarray(matrix, dtype=np.float64).reshape(4, 4, order='F')
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 1. LAZ via PDAL — Pipeline-JSON
-    if progress_callback: progress_callback('LAZ', 5)
-    out_laz = os.path.join(output_dir, 'model_realigned.laz')
-    pipeline = {
-        "pipeline": [
-            laz_path,
-            {"type": "filters.transformation",
-             "matrix": " ".join(f"{v:.10f}" for v in M.flatten(order='C'))},
-            {"type": "writers.las", "filename": out_laz, "compression": "true"}
-        ]
-    }
-    with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
-        json.dump(pipeline, f); pipeline_path = f.name
-    try:
-        subprocess.check_call(['pdal', 'pipeline', pipeline_path])
-    finally:
-        os.unlink(pipeline_path)
-    if progress_callback: progress_callback('LAZ done', 50)
-
-    # 2. GLB via pygltflib — CESIUM_RTC einbacken, dann M anwenden
-    out_glb = os.path.join(output_dir, 'model_realigned.glb')
-    _transform_glb(glb_path, out_glb, M)
-    if progress_callback: progress_callback('GLB done', 100)
-
-    return {'laz': out_laz, 'glb': out_glb}
-```
-
-`_transform_glb` Details:
-
-- `pygltflib.GLTF2.load(glb_path)`.
-- Wenn Extension `CESIUM_RTC` mit `center` vorhanden: Center in Vertex-Koords
-  einbacken (jede `POSITION` `+= center`), Extension entfernen. Sonst wirkt M
-  nur auf den mesh-lokalen Anteil.
-- Für jedes Mesh / jede Primitive: `POSITION`-Accessor lesen, Vertices als
-  `(N, 4)`-homogen erweitern, `(M @ verts.T).T[:, :3]`, zurück in den Buffer.
-- `NORMAL` / `TANGENT` (falls vorhanden) mit dem oberen 3×3-Block von M
-  (normalisiert) transformieren.
-- `gltf.save(out_glb)`.
-
-Dependency: `pygltflib` in `coreplugins/realign/requirements.txt` (analog
-`coreplugins/roof_detect/requirements.txt`, das `laspy>=2.0` listet). PDAL ist
-laut `Dockerfile:44,57` schon installiert, kein Container-Rebuild nötig.
-`numpy` ist im Image vorhanden.
-
-#### `coreplugins/realign/plugin.py` (erweitern)
-
-`api_mount_points()` für die drei Routen oben.
-
-### Frontend
-
-#### `coreplugins/realign/public/app.jsx` (erweitern)
-
-In `RealignPanel`:
-
-- Neuer Button **"Modell exportieren"** unter Speichern/Reset.
-  Disabled, solange kein gespeicherter Eintrag existiert (`!entryId`) — der
-  Export braucht eine persistierte Matrix.
-- State: `exportTaskId`, `exportProgress` (0..100), `exportStatus`, `exportUrls`.
-- Click-Handler: POST mit der aktuell gespeicherten Matrix
-  (`controller.lastData.matrix`) → bekommt `celery_task_id`, startet 2-s-Poll
-  auf `ExportStatusView`. Setzt `exportProgress` und – bei done –
-  `exportUrls`.
-- UI: Progress-Bar während Polling; bei done zwei Download-Buttons
-  ("LAZ herunterladen", "GLB herunterladen") mit `href` auf die Download-URLs.
-
-Authentifizierung: `$.ajax` mit Session-Cookie + CSRF-Setup (`csrf.js` global).
-Downloads als `<a href>` — die Browser-Standard-Auth (Cookie) reicht für
-FileResponse.
-
-### CESIUM_RTC-Hinweis
-
-Aus [`ModelView.jsx:794-797`](app/static/app/js/ModelView.jsx#L794-L797) wissen
-wir, dass das GLB optional einen `CESIUM_RTC.center`-Offset trägt. Bei
-direkter Vertex-Transformation muss dieser Offset **vor** dem Apply der Matrix
-in die Vertices eingebacken werden — sonst wirkt M auf
-`vertex - RTC.center` statt auf `vertex` selbst. Reihenfolge:
-
-1. `RTC.center` aus Extension auslesen
-2. Jede Vertex-Position: `pos += RTC.center` (in-place auf den Buffer schreiben)
-3. Extension entfernen
-4. M anwenden
-
-### Critical Files (Phase 2)
-
-| Datei | Verwendung |
-| --- | --- |
-| [coreplugins/roof_detect/api.py](coreplugins/roof_detect/api.py) | LESEN: Vorlage Detect/Status/Result-Trio, FileResponse-Pattern |
-| [coreplugins/roof_detect/detection.py](coreplugins/roof_detect/detection.py) | LESEN: PDAL-Pipeline-Aufruf via `subprocess` |
-| [app/plugins/worker.py](app/plugins/worker.py) | LESEN: `run_function_async` + `with_progress=True` |
-| [app/models/task.py](app/models/task.py) | LESEN: `assets_path()`, `ASSETS_MAP` (Z. 175–221) |
-| `coreplugins/realign/plugin.py` | EDIT: `api_mount_points()` ergänzen |
-| `coreplugins/realign/api.py` | NEU: ExportView, ExportStatusView, ExportDownloadView |
-| `coreplugins/realign/tasks.py` | NEU: `_run_export_task` + `_transform_glb` |
-| `coreplugins/realign/requirements.txt` | NEU: `pygltflib` |
-| `coreplugins/realign/public/app.jsx` | EDIT: Export-Button + Polling + Download-Links |
-
----
-
-## Deployment
-
-### Erstes Deployment / nach Plugin-Änderungen
+Frontend-Änderungen (app.jsx, main.js):
 
 ```bash
 cd ~/WebODM
 git fetch myfork && git reset --hard myfork/master
 docker exec webapp rm -rf /webodm/coreplugins/realign/public/build
-docker compose restart webapp worker
+docker exec webapp bash -c "cd /webodm/coreplugins/realign/public && webpack-cli"
+# Cloudflare-Cache für build/app.js purgen
 ```
 
-`webpack-Build` läuft beim Boot automatisch. Server-Routing:
+Komplett-Restart (z.B. nach `docker-compose.override.yml`-Änderung):
 
 ```bash
-docker restart roof-s-roofinspector_nginx-1  # falls externe 502 hängen
-sudo systemctl reload snap.nextcloud.apache.service  # nur falls Nextcloud-Pfad
+cd ~/WebODM
+git fetch myfork && git reset --hard myfork/master
+docker compose down && docker compose up -d
+# Nginx-Reverse-Proxy neu starten, falls 502:
+docker restart roof-s-roofinspector_nginx-1
 ```
 
-(Siehe Memory `WebODM Server Routing` für Pfad: Cloudflare Tunnel →
-roof-s-nginx → WebODM.)
+### Diagnose-Snippets
 
-### Cache nach Plugin-Updates
+LAZ-Bounds prüfen:
 
-Cloudflare cached `.js` aggressiv. Nach jedem Build:
+```bash
+LAZ=/webodm/app/media/project/<pid>/task/<tid>/assets/odm_georeferencing/odm_georeferenced_model.laz
+docker exec worker pdal info "$LAZ" --summary 2>/dev/null | python3 -m json.tool | head -20
+```
 
-- Cloudflare-Dashboard → Purge für `https://odm.netz-montageserver.de/plugins/realign/build/app.js`
-- ODER Browser-DevTools öffnen + Strg+Shift+R (umgeht Cache nur, wenn
-  Cloudflare den File nicht edge-cached)
-- ODER langfristig: Cache-Rule für `*/plugins/*` auf "Bypass"
+GLB-Node-Matrix prüfen (sollte nach Export kleine Werte zeigen, nicht UTM-Skala):
 
----
+```bash
+docker exec worker python3 -c "
+import pygltflib
+g = pygltflib.GLTF2.load('/webodm/.../realigned/model_realigned.glb')
+scene = g.scenes[g.scene or 0]
+for ni in (scene.nodes or []):
+    n = g.nodes[ni]
+    if n.matrix:
+        m = n.matrix
+        print(f'Node {ni} translation: [{m[12]:.3f}, {m[13]:.3f}, {m[14]:.3f}]')
+"
+```
 
-## Verifikation
+Erwartete Werte: kleine Zahlen (±20m), **nicht** UTM-Skala (518000+).
 
-### Phase 1
+### End-to-End-Test
 
-1. Task öffnen, Waage-Icon im Viewer-Toolbar klicken.
-2. 3 Punkte auf einer waagerechten Fläche wählen (Pflasterboden, Dachfläche).
-3. "Anwenden" → Pointcloud + Mesh rotieren sichtbar gemeinsam.
-4. Höhenmessung zwischen zwei Punkten auf dieser Ebene ≈ 0.
-5. Höhenmessung Boden ↔ Dachfirst → plausibler Wert.
-6. "Speichern" → API-Eintrag in `project_data` mit `entry_type:
-   "alignment_transform"`.
-7. Reload + manuelles "Anwenden" → wieder ausgerichtet (Auto-Apply bleibt aus).
+1. Task in WebODM öffnen, Waage-Icon klicken.
+2. 3 Punkte auf einer waagerechten Fläche wählen (z.B. Dach-First, zwei
+   Dach-Eckpunkte).
+3. "Speichern" → keine Fehlermeldung.
+4. "Modell exportieren" klicken → Progress 0 → 50 → 100.
+5. "LAZ" + "GLB" Download-Buttons erscheinen.
+6. LAZ in CloudCompare öffnen → Pointcloud horizontal.
+7. GLB in <https://modelviewer.dev/editor> öffnen → Modell sichtbar, horizontal,
+   Himmelsrichtung unverändert.
+8. Beide Files in Roof-S importieren → Modell wird im Roof-S-Viewer
+   horizontal angezeigt, Himmelsrichtung wie im Original.
 
-### Phase 2 (nach Umsetzung)
-
-1. Nach Phase-1-Save: "Modell exportieren" klicken.
-2. Progress-Bar 0 → 50 (LAZ done) → 100 (GLB done).
-3. Zwei Download-Buttons erscheinen.
-4. LAZ in CloudCompare öffnen → horizontal ausgerichtet, gleiche Ebene wie
-   Viewer-Apply.
-5. GLB in MeshLab/Blender öffnen → deckungsgleich mit LAZ, korrekt rotiert.
-6. Beide Files in Roof-S importieren → neuer Task, Modell steht horizontal.
+Erfolgreich verifiziert: Mai 2026 (Task `97bccb00-…`, Cloudflare-Tunnel
+`odm.netz-montageserver.de`).

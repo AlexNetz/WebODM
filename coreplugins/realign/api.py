@@ -7,7 +7,7 @@ from app.plugins.views import TaskView
 from app.plugins.worker import run_function_async
 from worker.tasks import TestSafeAsyncResult
 
-from .tasks import _run_export_task
+from .tasks import _run_export_task, _run_apply_task
 
 
 class ExportView(TaskView):
@@ -139,3 +139,115 @@ class ExportDownloadView(TaskView):
             as_attachment=True,
             filename=filename_map[kind],
         )
+
+
+class ApplyView(TaskView):
+    """Triggers the apply Celery task: regenerates EPT and swaps files."""
+
+    def post(self, request, pk=None, project_pk=None):
+        task = self.get_and_check_task(request, pk)
+
+        realigned_dir = task.assets_path('realigned')
+        realigned_laz = os.path.join(realigned_dir, 'model_realigned.laz')
+
+        if not os.path.isfile(realigned_laz):
+            return Response(
+                {'error': 'Keine realignte Punktwolke gefunden. '
+                          'Bitte zuerst den Export ausführen.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        assets_root = task.assets_path()
+
+        try:
+            celery_result = run_function_async(
+                _run_apply_task,
+                str(task.project_id),
+                str(task.id),
+                assets_root,
+                realigned_dir,
+                with_progress=True,
+            )
+            return Response({'celery_task_id': celery_result.task_id}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ApplyStatusView(TaskView):
+    """Polls the apply Celery task state. Mirrors ExportStatusView shape."""
+
+    def get(self, request, pk=None, project_pk=None, celery_task_id=None):
+        self.get_and_check_task(request, pk)
+
+        res = TestSafeAsyncResult(celery_task_id)
+
+        if not res.ready():
+            out = {'ready': False, 'status': res.state, 'progress': 0}
+            if res.state == 'PROGRESS' and res.info:
+                out['status']   = res.info.get('status', res.state)
+                out['progress'] = res.info.get('progress', 0)
+            return Response(out)
+
+        try:
+            res.get()
+        except Exception as e:
+            return Response({'ready': True, 'status': 'FAILURE', 'error': str(e)})
+
+        return Response({
+            'ready':    True,
+            'status':   'SUCCESS',
+            'progress': 100,
+        })
+
+
+class RevertView(TaskView):
+    """Synchronously restores the original EPT and GLB from backups."""
+
+    def post(self, request, pk=None, project_pk=None):
+        task = self.get_and_check_task(request, pk)
+        assets_root = task.assets_path()
+
+        ept_target = os.path.join(assets_root, 'entwine_pointcloud')
+        ept_backup = os.path.join(assets_root, 'entwine_pointcloud_original')
+        glb_target = os.path.join(assets_root, 'odm_texturing', 'odm_textured_model_geo.glb')
+        glb_backup = os.path.join(assets_root, 'odm_texturing', 'odm_textured_model_geo.original.glb')
+
+        if not os.path.isdir(ept_backup) and not os.path.isfile(glb_backup):
+            return Response(
+                {'error': 'Kein Original-Backup vorhanden. Apply wurde nie ausgeführt.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        import shutil
+
+        try:
+            if os.path.isdir(ept_backup):
+                if os.path.isdir(ept_target):
+                    shutil.rmtree(ept_target)
+                shutil.move(ept_backup, ept_target)
+
+            if os.path.isfile(glb_backup):
+                if os.path.isfile(glb_target):
+                    os.remove(glb_target)
+                shutil.move(glb_backup, glb_target)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Update project_data alignment_transform.applied = False
+        try:
+            from coreplugins.project_data.models import ProjectEntry
+            entries = ProjectEntry.objects.filter(
+                project_id=task.project_id,
+                task_id=task.id,
+                entry_type='alignment_transform',
+            )
+            for entry in entries:
+                data = dict(entry.data or {})
+                data['applied'] = False
+                entry.data = data
+                entry.save(update_fields=['data', 'updated_at'])
+        except Exception:
+            # File-swap already succeeded — don't surface a project_data error.
+            pass
+
+        return Response({'ok': True}, status=status.HTTP_200_OK)
