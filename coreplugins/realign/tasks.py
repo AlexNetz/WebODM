@@ -62,6 +62,8 @@ def _run_export_task(laz_path, glb_path, matrix, output_dir, progress_callback=N
                         continue
 
                     acc = gltf.accessors[accessor_idx]
+                    if acc.bufferView is None:
+                        continue  # sparse accessor — no buffer view, skip
                     bv  = gltf.bufferViews[acc.bufferView]
 
                     byte_offset = (bv.byteOffset or 0) + (acc.byteOffset or 0)
