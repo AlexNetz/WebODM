@@ -29,6 +29,13 @@ def load_pointcloud(path, decimation_step=100, clip_bounds=None):
 
     float64 is required: float32 quantises UTM-Y (~5.4 million) to 0.5 m steps,
     which collapses wall points onto discrete Y slices and creates RANSAC sub-planes.
+
+    clip_bounds accepts 4 or 6 elements:
+      - 4: [xmin, xmax, ymin, ymax] — axis-aligned 2D crop (XY only)
+      - 6: [xmin, xmax, ymin, ymax, zmin, zmax] — axis-aligned 3D crop (XYZ)
+    Coordinates are expected in the Potree/measurement coordinate system. For Z the
+    LAZ header offset is automatically subtracted before passing to pdal, since pdal
+    operates in the LAZ native Z (without offset).
     """
     import json, subprocess, tempfile, os
 
@@ -41,11 +48,27 @@ def load_pointcloud(path, decimation_step=100, clip_bounds=None):
 
     steps = [path]
     if clip_bounds is not None:
-        xmin, xmax, ymin, ymax = clip_bounds
-        steps.append({
-            "type": "filters.crop",
-            "bounds": f"([{xmin},{xmax}],[{ymin},{ymax}])",
-        })
+        if len(clip_bounds) == 6:
+            xmin, xmax, ymin, ymax, zmin_pot, zmax_pot = clip_bounds
+            # pdal arbeitet im LAZ-nativen Z (ohne Header-Offset) — Potree-Z hat den
+            # Offset addiert. Vor dem pdal-Crop also abziehen.
+            z_offset = get_laz_z_offset(path)
+            zmin = zmin_pot - z_offset
+            zmax = zmax_pot - z_offset
+            steps.append({
+                "type":   "filters.crop",
+                "bounds": f"([{xmin},{xmax}],[{ymin},{ymax}],[{zmin},{zmax}])",
+            })
+        elif len(clip_bounds) == 4:
+            xmin, xmax, ymin, ymax = clip_bounds
+            steps.append({
+                "type":   "filters.crop",
+                "bounds": f"([{xmin},{xmax}],[{ymin},{ymax}])",
+            })
+        else:
+            raise ValueError(
+                f'clip_bounds muss 4 oder 6 Elemente haben, hat {len(clip_bounds)}'
+            )
     steps.append({"type": "filters.decimation", "step": decimation_step})
     steps.append(las_tmp)
     pipeline = {"pipeline": steps}
@@ -345,10 +368,15 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
     _progress('Punktwolke laden (pdal)…', 5)
     pts = load_pointcloud(laz_path, decimation_step=decimation_step, clip_bounds=clip_bounds)
     n_loaded = len(pts)
+    # 6-Element-Bounds bedeuten: User hat per Volume-Box explizit eine 3D-AABB
+    # festgelegt → Höhenfilter und Boden-Erkennung werden übersprungen, da der
+    # User die Z-Range bewusst gewählt hat.
+    has_z_clip = clip_bounds is not None and len(clip_bounds) == 6
     if clip_bounds:
         import logging
         logging.getLogger(__name__).info(
-            f'[roof_detect] Clip bounds: {[round(v,1) for v in clip_bounds]}, '
+            f'[roof_detect] Clip bounds ({len(clip_bounds)}D): '
+            f'{[round(v,1) for v in clip_bounds]}, '
             f'points after crop+decimation: {n_loaded}'
         )
 
@@ -356,16 +384,21 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
     pts = voxel_downsample(pts, voxel=voxel_size)
     n_voxel = len(pts)
 
-    _progress('Bodenpunkte entfernen…', 30)
-    # Remove dominant ground plane first
-    pts = remove_ground(pts)
+    if has_z_clip:
+        # User hat Z-Range explizit per Volume-Box gesetzt → kein automatisches
+        # Bodenpunkt-Entfernen und kein Perzentil-Höhenfilter mehr.
+        n_ground = len(pts)
+    else:
+        _progress('Bodenpunkte entfernen…', 30)
+        # Remove dominant ground plane first
+        pts = remove_ground(pts)
 
-    # Keep only the top 20% of points by elevation.
-    # For a house scan: ground fills 70-80% of scan area → top 20% ≈ walls + roof.
-    # This is robust against sloped terrain where a fixed +Nm offset fails.
-    z_cutoff = float(np.percentile(pts[:, 2], height_percentile))
-    pts = pts[pts[:, 2] > z_cutoff]
-    n_ground = len(pts)
+        # Keep only the top 20% of points by elevation.
+        # For a house scan: ground fills 70-80% of scan area → top 20% ≈ walls + roof.
+        # This is robust against sloped terrain where a fixed +Nm offset fails.
+        z_cutoff = float(np.percentile(pts[:, 2], height_percentile))
+        pts = pts[pts[:, 2] > z_cutoff]
+        n_ground = len(pts)
 
     _progress('Dachebenen erkennen (RANSAC)…', 40)
     # Lenient parameters: low inlier ratio, more iterations, looser threshold

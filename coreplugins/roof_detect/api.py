@@ -210,7 +210,9 @@ class DetectView(TaskView):
 
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
         settings = {k: request.data.get(k, v) for k, v in SETTING_DEFAULTS.items()}
-        clip_bounds = request.data.get('clip_bounds')  # [xmin,xmax,ymin,ymax] or None
+        # clip_bounds vom Frontend: optional 4 (XY-AABB) oder 6 (XYZ-AABB) Werte.
+        # Mit 6 Werten überschreibt der User-Bereich Höhenfilter + Bodenerkennung.
+        clip_bounds = request.data.get('clip_bounds')  # [xmin,xmax,ymin,ymax] oder [...,zmin,zmax] oder None
         if clip_bounds:
             settings['clip_bounds'] = clip_bounds  # piggyback on settings dict to avoid Celery signature issues
 
