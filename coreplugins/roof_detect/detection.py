@@ -279,11 +279,13 @@ def _bbox_gap_2d(pts_a, pts_b):
     return float(np.sqrt(dx * dx + dy * dy))
 
 
-def compute_edges(planes, normal_z_max=0.9848, margin=1.0, parallel_cos=0.97, max_gap=5.0):
+def compute_edges(planes, min_normal_z=0.10, margin=1.0, parallel_cos=0.97, max_gap=5.0):
     edges = []
     n = len(planes)
-    # Only consider inclined planes (roof faces, not flat ground/ceiling remnants)
-    roof_planes = [p for p in planes if abs(p.normal[2]) < normal_z_max]
+    # Wand-Filter: nur Flächen mit ausreichend großer Vertikalkomponente betrachten.
+    # |n.z| > min_normal_z → schließt nur senkrechte Wände aus, Schräg- UND Flachdächer
+    # bleiben drin (Default 0.10 ≈ Flächen flacher als 84° passieren).
+    roof_planes = [p for p in planes if abs(p.normal[2]) > min_normal_z]
     n = len(roof_planes)
     for i in range(n):
         for j in range(i + 1, n):
@@ -358,7 +360,7 @@ def make_preview_points(planes, step=15):
 def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                   height_percentile=40, n_planes=15, iterations=1000,
                   threshold=0.15, min_inlier_ratio=0.01,
-                  normal_z_max=0.9848, margin=1.0,
+                  min_normal_z=0.10, margin=1.0,
                   parallel_cos=0.97, max_gap=5.0,
                   xyzc_out_path=None, clip_bounds=None, progress_callback=None):
     def _progress(msg, pct):
@@ -406,7 +408,7 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                            threshold=threshold, min_inlier_ratio=min_inlier_ratio)
 
     _progress('Schnittlinien berechnen…', 80)
-    edges = compute_edges(planes, normal_z_max=normal_z_max, margin=margin,
+    edges = compute_edges(planes, min_normal_z=min_normal_z, margin=margin,
                           parallel_cos=parallel_cos, max_gap=max_gap)
 
     # Filter spurious edges: midpoint must lie within the Z range of the input points
@@ -418,7 +420,8 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                  if z_roof_min <= (e['start'][2] + e['end'][2]) / 2 <= z_roof_max]
 
     _progress('Fertig', 100)
-    roof_planes = [p for p in planes if abs(p.normal[2]) < normal_z_max]
+    # Wand-Filter (siehe compute_edges): nur Flächen mit |n.z| > min_normal_z behalten.
+    roof_planes = [p for p in planes if abs(p.normal[2]) > min_normal_z]
 
     # 1. Drop planes with very few points (wall fragments, vegetation artefacts).
     if roof_planes:
