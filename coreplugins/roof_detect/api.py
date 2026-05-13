@@ -88,15 +88,25 @@ def _run_detection_task(laz_path, project_id, task_id, plugin_dir, settings, pro
 
 # ── point2cad task ─────────────────────────────────────────────────────────────
 
-def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_data, progress_callback=None):
+def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_data,
+                        p2cad_args=None, progress_callback=None):
     """
     Celery worker function: calls the point2cad microservice and stores the result.
     Self-contained (all imports inside).
+
+    p2cad_args: optional dict, durchgereicht an den point2cad-CLI. Whitelist
+    {max_parallel_surfaces, num_inr_fit_attempts, seed, surfaces_multiprocessing}
+    wird Service-seitig nochmal erzwungen.
+
+    On both SUCCESS and FAILURE, the latest stdout+stderr captured by the service
+    are persisted to project_data so the frontend can show what point2cad logged.
     """
     import os, sys, json, time
     import urllib.request
     import urllib.error
     from datetime import datetime, timezone
+
+    DB_LOG_LIMIT = 10000   # cap per stream when storing in JSONField
 
     def _progress(msg, pct):
         if progress_callback:
@@ -109,14 +119,18 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
 
     if not os.path.isfile(xyzc_path):
         raise FileNotFoundError(
-            f'Punktwolke (xyzc) nicht gefunden: {xyzc_path}. '
-            'Bitte zuerst RANSAC-Erkennung ausführen.'
+            'Punktwolke (xyzc) nicht gefunden: ' + xyzc_path +
+            '. Bitte zuerst RANSAC-Erkennung ausführen.'
         )
 
     # Trigger point2cad service
-    body = json.dumps({'xyzc_path': xyzc_path, 'out_path': out_path}).encode()
+    body = json.dumps({
+        'xyzc_path': xyzc_path,
+        'out_path':  out_path,
+        'p2cad_args': p2cad_args or {},
+    }).encode()
     req = urllib.request.Request(
-        f'{p2cad_service}/run',
+        '{}/run'.format(p2cad_service),
         data=body,
         headers={'Content-Type': 'application/json'},
     )
@@ -125,38 +139,37 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
             p2cad_task_id = json.loads(resp.read())['task_id']
     except urllib.error.URLError as e:
         raise RuntimeError(
-            f'point2cad-Service nicht erreichbar ({p2cad_service}): {e}. '
-            'Läuft der Service? docker compose up point2cad'
+            'point2cad-Service nicht erreichbar ({}): {}. '
+            'Läuft der Service? docker compose up point2cad'.format(p2cad_service, e)
         )
 
     _progress('point2cad läuft…', 5)
 
-    # Poll status (max 40 min)
+    # Poll status (max 40 min). st is the most-recent payload received.
+    st = None
     for i in range(480):
         time.sleep(5)
         try:
-            with urllib.request.urlopen(f'{p2cad_service}/status/{p2cad_task_id}', timeout=10) as resp:
+            with urllib.request.urlopen(
+                '{}/status/{}'.format(p2cad_service, p2cad_task_id), timeout=10
+            ) as resp:
                 st = json.loads(resp.read())
         except Exception:
             continue  # transient network error — keep polling
 
         pct = min(90, 5 + int(i * 85 / 200))
-        _progress(f'Verarbeite Flächen… ({i * 5}s)', pct)
+        _progress('Verarbeite Flächen… ({}s)'.format(i * 5), pct)
 
-        if st['done']:
+        if st.get('done'):
             break
     else:
         raise TimeoutError('point2cad timed out after 40 minutes')
 
-    if not st['success']:
-        error_text = st.get('error') or 'unbekannter Fehler'
-        raise RuntimeError(f"point2cad fehlgeschlagen:\n{error_text}")
-
-    _progress('Ergebnis speichern…', 92)
-
-    topo_path = os.path.join(out_path, 'topo', 'topo.json')
-    with open(topo_path) as f:
-        topo = json.load(f)
+    # Capture logs regardless of success/failure
+    logs = {
+        'stdout': (st.get('stdout') or '')[-DB_LOG_LIMIT:],
+        'stderr': (st.get('stderr') or '')[-DB_LOG_LIMIT:],
+    }
 
     from coreplugins.project_data.models import ProjectEntry
 
@@ -164,12 +177,52 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
         project_id=project_id, task_id=task_id, entry_type='cad_result'
     ).delete()
 
+    if not st.get('success'):
+        # Persist the failure (logs + flag) before raising so the frontend can
+        # fetch /cad/result/ and show point2cad's own diagnostics.
+        ProjectEntry.objects.create(
+            project_id=project_id, task_id=task_id,
+            entry_type='cad_result', title='Point2CAD Ergebnis (Fehler)',
+            data={
+                'topo': None,
+                'mesh_available': False,
+                'logs': logs,
+                'failed': True,
+                'computed_at': datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        error_text = st.get('error') or 'unbekannter Fehler'
+        raise RuntimeError('point2cad fehlgeschlagen:\n' + error_text)
+
+    _progress('Ergebnis speichern…', 92)
+
+    topo_path = os.path.join(out_path, 'topo', 'topo.json')
+    try:
+        with open(topo_path) as f:
+            topo = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        # point2cad reported success but topo.json is missing/broken — surface
+        # the situation through logs rather than crashing opaquely.
+        ProjectEntry.objects.create(
+            project_id=project_id, task_id=task_id,
+            entry_type='cad_result', title='Point2CAD Ergebnis (Topo fehlt)',
+            data={
+                'topo': None,
+                'mesh_available': os.path.isfile(os.path.join(out_path, 'clipped', 'mesh.ply')),
+                'logs': logs,
+                'failed': True,
+                'computed_at': datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        raise RuntimeError('topo.json nicht lesbar: {}'.format(e))
+
     ProjectEntry.objects.create(
         project_id=project_id, task_id=task_id,
         entry_type='cad_result', title='Point2CAD Ergebnis',
         data={
             'topo': topo,
             'mesh_available': os.path.isfile(os.path.join(out_path, 'clipped', 'mesh.ply')),
+            'logs': logs,
             'computed_at': datetime.now(timezone.utc).isoformat(),
         }
     )
@@ -279,10 +332,28 @@ class ResultView(TaskView):
 
 # ── point2cad views ────────────────────────────────────────────────────────────
 
+P2CAD_ARG_WHITELIST = {
+    'max_parallel_surfaces',
+    'num_inr_fit_attempts',
+    'seed',
+    'surfaces_multiprocessing',
+}
+
+
 class CADView(TaskView):
     def post(self, request, pk=None, project_pk=None):
         task = self.get_and_check_task(request, pk)
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Defense-in-depth: filter to known args before passing to the worker
+        # (the point2cad service enforces the same whitelist).
+        raw_args = request.data.get('p2cad_args') or {}
+        if not isinstance(raw_args, dict):
+            return Response(
+                {'error': 'p2cad_args muss ein Objekt sein.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        p2cad_args = {k: v for k, v in raw_args.items() if k in P2CAD_ARG_WHITELIST}
 
         try:
             celery_result = run_function_async(
@@ -292,6 +363,7 @@ class CADView(TaskView):
                 plugin_dir,
                 P2CAD_SERVICE,
                 P2CAD_DATA,
+                p2cad_args,
                 with_progress=True,
             )
             return Response({'celery_task_id': celery_result.task_id}, status=status.HTTP_200_OK)

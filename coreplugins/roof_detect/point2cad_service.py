@@ -3,14 +3,31 @@ Minimal HTTP service wrapping the point2cad CLI.
 Mounted into the point2cad container, started via docker-compose command override.
 
 Endpoints:
-  POST /run    {"xyzc_path": "...", "out_path": "..."}  → {"task_id": "..."}
-  GET  /status/<task_id>                                → {"done": bool, "success": bool, "error": str|null}
+  POST /run    {"xyzc_path": "...", "out_path": "...", "p2cad_args": {...}}
+                                                        → {"task_id": "..."}
+  GET  /status/<task_id>                                → {"done": bool, "success": bool,
+                                                            "error": str|null,
+                                                            "stdout": str, "stderr": str}
+
+p2cad_args (alle optional, durchgereicht als CLI-Flags an point2cad.main):
+  max_parallel_surfaces, num_inr_fit_attempts, seed, surfaces_multiprocessing
 """
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json, subprocess, threading, uuid, os, sys
 
-jobs = {}  # task_id → {done, success, error}
+jobs = {}  # task_id → {done, success, error, stdout, stderr}
+
+# Hartkodiert auf Service-Seite — verhindert command injection und unbekannte Flags.
+P2CAD_ARG_WHITELIST = {
+    'max_parallel_surfaces',
+    'num_inr_fit_attempts',
+    'seed',
+    'surfaces_multiprocessing',
+}
+
+# Cap stdout/stderr per job to keep memory + status responses bounded.
+LOG_LIMIT = 30000
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -19,9 +36,17 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length))
         xyzc_path = body['xyzc_path']
         out_path = body['out_path']
+        p2cad_args = body.get('p2cad_args') or {}
         task_id = str(uuid.uuid4())
-        jobs[task_id] = {'done': False, 'success': False, 'error': None}
-        threading.Thread(target=_run, args=(task_id, xyzc_path, out_path), daemon=True).start()
+        jobs[task_id] = {
+            'done': False, 'success': False, 'error': None,
+            'stdout': '', 'stderr': '',
+        }
+        threading.Thread(
+            target=_run,
+            args=(task_id, xyzc_path, out_path, p2cad_args),
+            daemon=True,
+        ).start()
         self._respond(201, {'task_id': task_id})
 
     def do_GET(self):
@@ -46,7 +71,7 @@ class Handler(BaseHTTPRequestHandler):
         pass  # suppress per-request logging
 
 
-def _run(task_id, xyzc_path, out_path):
+def _run(task_id, xyzc_path, out_path, p2cad_args=None):
     os.makedirs(out_path, exist_ok=True)
     env = {
         **os.environ,
@@ -60,24 +85,38 @@ def _run(task_id, xyzc_path, out_path):
     # Set P2CAD_FORCE_CPU=1 in docker-compose to enable; remove for GPU mode.
     if os.environ.get('P2CAD_FORCE_CPU', '').lower() in ('1', 'true', 'yes'):
         env['CUDA_VISIBLE_DEVICES'] = ''
+
+    cmd = [
+        sys.executable, '-m', 'point2cad.main',
+        '--path_in', xyzc_path,
+        '--path_out', out_path,
+    ]
+    # Append whitelisted point2cad CLI args from the request body.
+    # No fallback default — when nothing is passed, point2cad's own defaults apply.
+    for k, v in (p2cad_args or {}).items():
+        if k in P2CAD_ARG_WHITELIST and v is not None:
+            cmd.extend(['--{}'.format(k), str(v)])
+
     result = subprocess.run(
-        [
-            sys.executable, '-m', 'point2cad.main',
-            '--path_in', xyzc_path,
-            '--path_out', out_path,
-            '--max_parallel_surfaces', '1',
-        ],
+        cmd,
         capture_output=True,
         cwd=out_path,   # task-specific dir → each task gets its own tmp.obj
         env=env,
     )
     success = result.returncode == 0
-    error = result.stderr.decode(errors='replace') if not success else None
-    jobs[task_id] = {'done': True, 'success': success, 'error': error}
+    stdout = result.stdout.decode(errors='replace')[-LOG_LIMIT:]
+    stderr = result.stderr.decode(errors='replace')[-LOG_LIMIT:]
+    jobs[task_id] = {
+        'done': True,
+        'success': success,
+        'error': stderr if not success else None,
+        'stdout': stdout,
+        'stderr': stderr,
+    }
     if not success:
-        print(f'[point2cad] task {task_id} FAILED:\n{error}', flush=True)
+        print('[point2cad] task {} FAILED:\n{}'.format(task_id, stderr), flush=True)
     else:
-        print(f'[point2cad] task {task_id} done', flush=True)
+        print('[point2cad] task {} done'.format(task_id), flush=True)
 
 
 if __name__ == '__main__':
