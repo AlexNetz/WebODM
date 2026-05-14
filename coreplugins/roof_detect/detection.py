@@ -222,9 +222,55 @@ def detect_planes(pts, n_planes=15, iterations=500, threshold=0.10,
     return planes
 
 
-def split_disjoint_planes(planes, split_gap=1.0, min_cluster_pts=15):
+def _dbscan_xy(points_xy, eps, min_samples):
     """
-    Split each Plane into spatially-disjoint sub-planes via 2D-XY clustering.
+    Minimal DBSCAN on 2D points. Returns int labels; -1 = noise.
+
+    Standard DBSCAN: a point is a CORE point if it has ≥ min_samples neighbours
+    within eps (incl. itself). Core points propagate their cluster id to all
+    points reachable within eps. Border points (reach a core but are not core
+    themselves) join that cluster. Isolated points are labelled -1 (noise).
+
+    Density-aware: a single "bridge" point between two dense blobs has too few
+    neighbours to be core, so the two blobs stay separate. This is the key
+    difference from naive connected-components on r-distance pairs, which would
+    glue the blobs together through that one bridge point.
+    """
+    from scipy.spatial import cKDTree
+    n = len(points_xy)
+    if n == 0:
+        return np.zeros(0, dtype=np.int64)
+    tree = cKDTree(points_xy)
+    neighbors = tree.query_ball_point(points_xy, r=eps)
+
+    is_core = np.fromiter(
+        (len(nb) >= min_samples for nb in neighbors),
+        dtype=bool, count=n,
+    )
+    labels = np.full(n, -1, dtype=np.int64)
+
+    cluster_id = 0
+    for i in range(n):
+        if labels[i] != -1 or not is_core[i]:
+            continue
+        # BFS from this seed core point — assign cluster_id to everything reachable.
+        labels[i] = cluster_id
+        queue = list(neighbors[i])
+        while queue:
+            j = queue.pop()
+            if labels[j] != -1:
+                continue
+            labels[j] = cluster_id
+            if is_core[j]:
+                queue.extend(neighbors[j])
+        cluster_id += 1
+
+    return labels
+
+
+def split_disjoint_planes(planes, split_gap=1.0, min_cluster_pts=15, min_samples=5):
+    """
+    Split each Plane into spatially-disjoint sub-planes via 2D-XY DBSCAN.
 
     RANSAC selects inliers purely by mathematical plane distance, so multiple
     physically-separate roof patches with the same orientation + height end up
@@ -233,42 +279,28 @@ def split_disjoint_planes(planes, split_gap=1.0, min_cluster_pts=15):
     over the disjoint blobs — the result is a degenerate surface that confuses
     the topological clipping.
 
-    Two points belong to the same cluster if their XY distance is ≤ split_gap.
-    Sub-clusters with fewer than min_cluster_pts points are dropped as noise.
-    """
-    from scipy.spatial import cKDTree
+    DBSCAN over the naive r-neighbour graph: a sparse "bridge" of misclassified
+    RANSAC-inlier points between two dense roof patches has <min_samples nearby
+    neighbours → it is treated as noise instead of merging the patches. The
+    dense patches stay separate. Sub-clusters with <min_cluster_pts points are
+    dropped after labelling.
 
+    eps = split_gap. min_samples=5 by default — matches DBSCAN's typical 2D
+    setting. Increase if RANSAC produces lots of noise pairs in dense regions.
+    """
     out = []
     for plane in planes:
         n = len(plane.points)
         if n < min_cluster_pts:
             continue
 
-        # 2D XY clustering — roof patches are nearly coplanar so Z adds noise.
         xy = plane.points[:, :2].astype(np.float64)
-        tree = cKDTree(xy)
-        pairs = tree.query_pairs(r=split_gap, output_type='ndarray')
+        labels = _dbscan_xy(xy, eps=split_gap, min_samples=min_samples)
 
-        # Union-Find with iterative path compression.
-        parent = np.arange(n, dtype=np.int64)
-
-        def find(x):
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        for a, b in pairs:
-            ra, rb = find(int(a)), find(int(b))
-            if ra != rb:
-                parent[ra] = rb
-
-        # Group point indices by their cluster root.
-        roots = np.fromiter((find(i) for i in range(n)), dtype=np.int64, count=n)
-        unique_roots, inverse = np.unique(roots, return_inverse=True)
-
-        for cluster_idx in range(len(unique_roots)):
-            idxs = np.where(inverse == cluster_idx)[0]
+        for cluster_id in np.unique(labels):
+            if cluster_id == -1:
+                continue  # noise points — discard
+            idxs = np.where(labels == cluster_id)[0]
             if len(idxs) < min_cluster_pts:
                 continue
             sub_points = plane.points[idxs]
