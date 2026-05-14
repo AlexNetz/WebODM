@@ -222,6 +222,62 @@ def detect_planes(pts, n_planes=15, iterations=500, threshold=0.10,
     return planes
 
 
+def split_disjoint_planes(planes, split_gap=1.0, min_cluster_pts=15):
+    """
+    Split each Plane into spatially-disjoint sub-planes via 2D-XY clustering.
+
+    RANSAC selects inliers purely by mathematical plane distance, so multiple
+    physically-separate roof patches with the same orientation + height end up
+    sharing one plane id (e.g. dormers on different sides of a hip roof).
+    point2cad accepts those ids as ground truth and fits a single INR surface
+    over the disjoint blobs — the result is a degenerate surface that confuses
+    the topological clipping.
+
+    Two points belong to the same cluster if their XY distance is ≤ split_gap.
+    Sub-clusters with fewer than min_cluster_pts points are dropped as noise.
+    """
+    from scipy.spatial import cKDTree
+
+    out = []
+    for plane in planes:
+        n = len(plane.points)
+        if n < min_cluster_pts:
+            continue
+
+        # 2D XY clustering — roof patches are nearly coplanar so Z adds noise.
+        xy = plane.points[:, :2].astype(np.float64)
+        tree = cKDTree(xy)
+        pairs = tree.query_pairs(r=split_gap, output_type='ndarray')
+
+        # Union-Find with iterative path compression.
+        parent = np.arange(n, dtype=np.int64)
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for a, b in pairs:
+            ra, rb = find(int(a)), find(int(b))
+            if ra != rb:
+                parent[ra] = rb
+
+        # Group point indices by their cluster root.
+        roots = np.fromiter((find(i) for i in range(n)), dtype=np.int64, count=n)
+        unique_roots, inverse = np.unique(roots, return_inverse=True)
+
+        for cluster_idx in range(len(unique_roots)):
+            idxs = np.where(inverse == cluster_idx)[0]
+            if len(idxs) < min_cluster_pts:
+                continue
+            sub_points = plane.points[idxs]
+            # Same mathematical plane (normal, d) — only the inlier set differs.
+            out.append(Plane(plane.normal, plane.d, sub_points))
+
+    return out
+
+
 # ── Intersection line computation ─────────────────────────────────────────────
 
 def _plane_intersection_line(plane_a, plane_b):
@@ -362,6 +418,7 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                   threshold=0.15, min_inlier_ratio=0.01,
                   min_normal_z=0.10, margin=1.0,
                   parallel_cos=0.97, max_gap=5.0,
+                  split_gap=1.0, min_cluster_pts=15,
                   xyzc_out_path=None, clip_bounds=None, progress_callback=None):
     def _progress(msg, pct):
         if progress_callback:
@@ -428,6 +485,15 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
         max_pts = max(len(p.points) for p in roof_planes)
         min_pts = max(50, int(max_pts * 0.01))
         roof_planes = [p for p in roof_planes if len(p.points) >= min_pts]
+
+    # 1b. Split spatially-disjoint sub-clusters (e.g. dormers on different sides
+    #     of a hip roof that RANSAC lumped into one plane). Each sub-cluster
+    #     becomes its own Plane object with its own id so point2cad fits a
+    #     separate INR surface per physical roof patch.
+    if roof_planes:
+        roof_planes = split_disjoint_planes(
+            roof_planes, split_gap=split_gap, min_cluster_pts=min_cluster_pts,
+        )
 
     # 2. Keep only the spatially connected component that contains the largest plane.
     #    Two planes are "connected" if their XY bounding boxes are within max_gap of

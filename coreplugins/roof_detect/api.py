@@ -16,6 +16,10 @@ SETTING_DEFAULTS = {
     'n_planes': 15, 'iterations': 1000, 'threshold': 0.15,
     'min_inlier_ratio': 0.01, 'min_normal_z': 0.10, 'margin': 1.0,
     'parallel_cos': 0.97, 'max_gap': 5.0,
+    # Spatial-cluster split: separates dormers / chimneys that RANSAC merged
+    # into one plane (same orientation + height but disjoint XY footprint).
+    'split_gap': 1.0,           # m — points farther apart in XY = separate cluster
+    'min_cluster_pts': 15,      # drop sub-clusters smaller than this (noise)
 }
 
 
