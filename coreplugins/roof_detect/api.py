@@ -20,6 +20,10 @@ SETTING_DEFAULTS = {
     # into one plane (same orientation + height but disjoint XY footprint).
     'split_gap': 1.0,           # m — points farther apart in XY = separate cluster
     'min_cluster_pts': 15,      # drop sub-clusters smaller than this (noise)
+    # Morphological-erosion split: breaks thin corridors that link physically
+    # separate roof patches sharing a plane equation (e.g. ridge-cap streak
+    # connecting dormers on opposite roof sides). 0 = disabled.
+    'bridge_width': 0.0,        # m — erode away inlier corridors thinner than this
 }
 
 

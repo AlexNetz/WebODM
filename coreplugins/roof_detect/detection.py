@@ -268,6 +268,92 @@ def _dbscan_xy(points_xy, eps, min_samples):
     return labels
 
 
+def split_thin_bridges(planes, bridge_width=0.0, min_component_pts=15):
+    """
+    Break each plane along thin spatial "bridges" via morphological erosion.
+
+    RANSAC selects inliers purely by mathematical plane distance. A flat-dormer
+    plane equation is also satisfied by main-roof points that happen to lie at
+    the dormer's Z-level near the ridge top — those bridge points form a thin
+    linear streak that connects dormers on opposite roof sides into one plane id.
+    DBSCAN can't separate them because the streak is dense enough along its
+    length to satisfy min_samples.
+
+    Erosion is the right tool here: rasterize inliers to a 2D occupancy grid,
+    erode by bridge_width/2, then label connected components. Any inlier corridor
+    narrower than bridge_width disappears; dense blobs survive. After labelling,
+    boundary points are reassigned to their nearest surviving component via a
+    distance transform so the cluster footprint doesn't shrink.
+
+    bridge_width <= 0 disables this pass entirely (early-return).
+    """
+    if bridge_width <= 0 or not planes:
+        return list(planes)
+
+    from scipy.ndimage import binary_erosion, label, distance_transform_edt
+
+    cell_size = max(0.05, bridge_width / 4.0)
+    erode_cells = max(1, int(round(bridge_width / 2.0 / cell_size)))
+    structure = np.ones((2 * erode_cells + 1, 2 * erode_cells + 1), dtype=bool)
+
+    out = []
+    for plane in planes:
+        pts = plane.points
+        if len(pts) < min_component_pts:
+            # Too few points to bother splitting — keep as-is.
+            out.append(plane)
+            continue
+
+        xy = pts[:, :2].astype(np.float64)
+        xmin, ymin = xy.min(axis=0)
+        xmax, ymax = xy.max(axis=0)
+
+        nx = int(np.ceil((xmax - xmin) / cell_size)) + 1
+        ny = int(np.ceil((ymax - ymin) / cell_size)) + 1
+
+        if nx <= 2 * erode_cells + 1 or ny <= 2 * erode_cells + 1:
+            # Grid smaller than the structuring element → erosion would wipe
+            # everything. Bail out cleanly, keep original plane.
+            out.append(plane)
+            continue
+
+        gx = ((xy[:, 0] - xmin) / cell_size).astype(np.int64)
+        gy = ((xy[:, 1] - ymin) / cell_size).astype(np.int64)
+        gx = np.clip(gx, 0, nx - 1)
+        gy = np.clip(gy, 0, ny - 1)
+
+        grid = np.zeros((nx, ny), dtype=bool)
+        grid[gx, gy] = True
+
+        eroded = binary_erosion(grid, structure=structure)
+        if not eroded.any():
+            # Plane is entirely thin (all features narrower than bridge_width).
+            # Don't fragment it — likely a legitimate slender structure.
+            out.append(plane)
+            continue
+
+        labels_grid, n_labels = label(eroded)
+        if n_labels <= 1:
+            # One component → no thin bridge detected → no split needed.
+            out.append(plane)
+            continue
+
+        # Dilate-back: every original grid cell gets the label of the nearest
+        # surviving (labelled) cell so boundary points don't get dropped.
+        _, (idx_x, idx_y) = distance_transform_edt(
+            labels_grid == 0, return_indices=True
+        )
+        pt_labels = labels_grid[idx_x[gx, gy], idx_y[gx, gy]]
+
+        for cluster_id in range(1, n_labels + 1):
+            mask = pt_labels == cluster_id
+            if mask.sum() < min_component_pts:
+                continue
+            out.append(Plane(plane.normal, plane.d, pts[mask]))
+
+    return out
+
+
 def split_disjoint_planes(planes, split_gap=1.0, min_cluster_pts=15, min_samples=5):
     """
     Split each Plane into spatially-disjoint sub-planes via 2D-XY DBSCAN.
@@ -451,6 +537,7 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                   min_normal_z=0.10, margin=1.0,
                   parallel_cos=0.97, max_gap=5.0,
                   split_gap=1.0, min_cluster_pts=15,
+                  bridge_width=0.0,
                   xyzc_out_path=None, clip_bounds=None, progress_callback=None):
     def _progress(msg, pct):
         if progress_callback:
@@ -525,6 +612,15 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
     if roof_planes:
         roof_planes = split_disjoint_planes(
             roof_planes, split_gap=split_gap, min_cluster_pts=min_cluster_pts,
+        )
+
+    # 1c. Break thin-bridge artefacts where RANSAC plane equations are satisfied
+    #     by a narrow streak of points crossing the main roof (e.g. ridge cap
+    #     points sharing the flat-dormer plane's Z-level). Morphological erosion
+    #     removes corridors narrower than bridge_width; disabled at 0.0.
+    if roof_planes and bridge_width > 0:
+        roof_planes = split_thin_bridges(
+            roof_planes, bridge_width=bridge_width, min_component_pts=min_cluster_pts,
         )
 
     # 2. Keep only the spatially connected component that contains the largest plane.
