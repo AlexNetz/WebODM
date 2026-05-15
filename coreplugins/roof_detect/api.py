@@ -29,6 +29,11 @@ SETTING_DEFAULTS = {
     # lobes where a plane equation extends into another roof patch's region.
     # 0.0 = disabled; 0.5 = neighbourhood majority must be own plane.
     'min_same_plane_ratio': 0.0,
+}
+
+# Defaults for the point2cad phase (NOT consumed by run_detection — keep
+# separate from SETTING_DEFAULTS so DetectView doesn't forward them).
+P2CAD_PHASE_DEFAULTS = {
     # Post-trim distance (m): after point2cad finishes, drops mesh faces whose
     # centroid is farther than this from any inlier of their source plane.
     # Compensates for point2cad's clipping leaving lobes attached when they
@@ -518,14 +523,16 @@ class CADView(TaskView):
         p2cad_args = {k: v for k, v in raw_args.items() if k in P2CAD_ARG_WHITELIST}
 
         # Post-trim distance (in metres) — applied after point2cad finishes to
-        # remove mesh faces far from any inlier of their source plane.
+        # remove mesh faces far from any inlier of their source plane. Lives in
+        # P2CAD_PHASE_DEFAULTS so DetectView doesn't accidentally forward it to
+        # run_detection (which doesn't take this kwarg).
         try:
             posttrim_distance_m = float(
                 request.data.get('posttrim_distance_m',
-                                  SETTING_DEFAULTS['posttrim_distance_m'])
+                                  P2CAD_PHASE_DEFAULTS['posttrim_distance_m'])
             )
         except (TypeError, ValueError):
-            posttrim_distance_m = SETTING_DEFAULTS['posttrim_distance_m']
+            posttrim_distance_m = P2CAD_PHASE_DEFAULTS['posttrim_distance_m']
 
         try:
             celery_result = run_function_async(
