@@ -115,10 +115,11 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
     from datetime import datetime, timezone
 
     DB_LOG_LIMIT = 10000   # cap per stream when storing in JSONField
+    LIVE_LOG_TAIL = 4000   # chars per stream forwarded through progress meta
 
-    def _progress(msg, pct):
+    def _progress(msg, pct, **extra):
         if progress_callback:
-            progress_callback(msg, pct)
+            progress_callback(msg, pct, **extra)
 
     _progress('Starte point2cad…', 2)
 
@@ -165,11 +166,19 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
         except Exception:
             continue  # transient network error — keep polling
 
-        pct = min(90, 5 + int(i * 85 / 200))
-        _progress('Verarbeite Flächen… ({}s)'.format(i * 5), pct)
-
         if st.get('done'):
             break
+
+        # Forward live log tails to the frontend through Celery progress meta.
+        # Frontend shows the latest stderr/stdout snippets so a stalled 90 %
+        # bar isn't a black box.
+        pct = min(90, 5 + int(i * 85 / 200))
+        live_stdout = (st.get('stdout') or '')[-LIVE_LOG_TAIL:]
+        live_stderr = (st.get('stderr') or '')[-LIVE_LOG_TAIL:]
+        _progress(
+            'Verarbeite Flächen… ({}s)'.format(i * 5), pct,
+            live_stdout=live_stdout, live_stderr=live_stderr,
+        )
     else:
         raise TimeoutError('point2cad timed out after 40 minutes')
 
@@ -390,6 +399,10 @@ class CADStatusView(TaskView):
             if res.state == 'PROGRESS' and res.info:
                 out['status'] = res.info.get('status', res.state)
                 out['progress'] = res.info.get('progress', 0)
+                # Live log tails — set by _run_point2cad_task each poll so the
+                # frontend can render point2cad's current output while running.
+                out['live_stdout'] = res.info.get('live_stdout', '')
+                out['live_stderr'] = res.info.get('live_stderr', '')
             return Response(out)
 
         try:
