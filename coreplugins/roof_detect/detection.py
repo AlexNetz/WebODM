@@ -550,23 +550,73 @@ def compute_edges(planes, min_normal_z=0.10, margin=1.0, parallel_cos=0.97, max_
 
 # ── point2cad helpers ─────────────────────────────────────────────────────────
 
+def _rotation_matrix_a_to_b(A, B):
+    """1:1 replica of point2cad's `utils.rotation_matrix_a_to_b`. Required so our
+    pre-applied normalisation matches what point2cad would compute internally —
+    otherwise normalize_points isn't idempotent and Mesh/xyzc end up in slightly
+    different frames, breaking post-trim distance comparisons.
+    """
+    EPS = np.finfo(np.float32).eps
+    cos = float(np.dot(A, B))
+    sin = float(np.linalg.norm(np.cross(B, A)))
+    u = A
+    v = B - np.dot(A, B) * A
+    v = v / (np.linalg.norm(v) + EPS)
+    w = np.cross(B, A)
+    w = w / (np.linalg.norm(w) + EPS)
+    F = np.stack([u, v, w], 1)
+    G = np.array([[cos, -sin, 0], [sin, cos, 0], [0, 0, 1]])
+    try:
+        R = F @ G @ np.linalg.inv(F)
+    except np.linalg.LinAlgError:
+        R = np.eye(3, dtype=np.float64)
+    return R.astype(np.float64)
+
+
 def export_xyzc(planes, path):
     """Write RANSAC planes as .xyzc (point2cad input). Returns coordinate stats.
 
-    Coordinates are centred at the point-cloud centroid before writing so that
-    point2cad (and its output PLY / topo.json) works in a local frame near the
-    origin.  The original centroid is returned so callers can georeference back.
+    Pre-applies point2cad's `normalize_points` transform (centroid + PCA rotation
+    + isotropic scaling) so the output Mesh and our xyzc inliers end up in the
+    same coordinate frame. point2cad's own `normalize_points` is idempotent → no-
+    op after our pre-application. Without this the post-trim cannot meaningfully
+    compare mesh vertices to inlier points (different frames).
+
+    Returned stats include `centroid`, `rotation` (3×3), `scale` so the caller
+    can undo the transform if needed (e.g. for georeferencing).
     """
     import os
+    EPS = np.finfo(np.float32).eps
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    pts_all = np.vstack([p.points for p in planes])
+
+    pts_all = np.vstack([p.points for p in planes]).astype(np.float64)
     ids_all = np.concatenate([np.full(len(p.points), i) for i, p in enumerate(planes)])
+
+    # 1. Centroid shift
     centroid = pts_all.mean(axis=0)
-    pts_centered = pts_all - centroid          # local coords, ~0-centred
-    np.savetxt(path, np.column_stack([pts_centered.astype(np.float64), ids_all]), fmt='%.6f %.6f %.6f %d')
+    pts = pts_all - centroid
+
+    # 2. PCA rotation — align smallest-eigenvalue axis with X (point2cad convention).
+    cov = pts.T @ pts
+    S, U = np.linalg.eig(cov)
+    smallest_ev = U[:, np.argmin(S)]
+    smallest_ev = np.real(smallest_ev).astype(np.float64)
+    R = _rotation_matrix_a_to_b(smallest_ev, np.array([1.0, 0.0, 0.0]))
+    pts = (R @ pts.T).T
+
+    # 3. Isotropic scaling by largest span (matches point2cad anisotropic=False).
+    std = pts.max(0) - pts.min(0)
+    scale = float(np.max(std)) + EPS
+    pts = pts / scale
+
+    np.savetxt(path,
+               np.column_stack([pts.astype(np.float64), ids_all]),
+               fmt='%.6f %.6f %.6f %d')
+
     return {
-        'centroid': centroid.tolist(),         # UTM origin for back-projection
-        'scale': float((pts_all.max(0) - pts_all.min(0)).max()),
+        'centroid': centroid.tolist(),      # UTM origin for back-projection
+        'rotation': R.tolist(),             # 3×3 — applied AFTER centroid shift
+        'scale': scale,                     # divisor — applied AFTER rotation
         'n_planes': len(planes),
         'n_points': int(len(pts_all)),
     }

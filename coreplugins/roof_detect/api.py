@@ -29,6 +29,11 @@ SETTING_DEFAULTS = {
     # lobes where a plane equation extends into another roof patch's region.
     # 0.0 = disabled; 0.5 = neighbourhood majority must be own plane.
     'min_same_plane_ratio': 0.0,
+    # Post-trim distance (m): after point2cad finishes, drops mesh faces whose
+    # centroid is farther than this from any inlier of their source plane.
+    # Compensates for point2cad's clipping leaving lobes attached when they
+    # don't cross another surface. 0.0 disables post-trim.
+    'posttrim_distance_m': 0.30,
 }
 
 
@@ -102,7 +107,8 @@ def _run_detection_task(laz_path, project_id, task_id, plugin_dir, settings, pro
 # ── point2cad task ─────────────────────────────────────────────────────────────
 
 def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_data,
-                        p2cad_args=None, progress_callback=None):
+                        p2cad_args=None, posttrim_distance_m=0.30,
+                        progress_callback=None):
     """
     Celery worker function: calls the point2cad microservice and stores the result.
     Self-contained (all imports inside).
@@ -110,6 +116,11 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
     p2cad_args: optional dict, durchgereicht an den point2cad-CLI. Whitelist
     {max_parallel_surfaces, num_inr_fit_attempts, seed, surfaces_multiprocessing}
     wird Service-seitig nochmal erzwungen.
+
+    posttrim_distance_m: after point2cad finishes, mesh faces whose centroid is
+    farther than this (in metres) from any inlier of their source plane get
+    dropped. 0 or negative disables the post-trim. Compensates for point2cad's
+    clipping leaving lobes attached when they don't cross another surface.
 
     On both SUCCESS and FAILURE, the latest stdout+stderr captured by the service
     are persisted to project_data so the frontend can show what point2cad logged.
@@ -252,6 +263,121 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
         )
         raise RuntimeError('topo.json nicht lesbar: {}'.format(e))
 
+    # ── Post-trim: drop mesh faces whose centroid is far from any inlier of
+    # their source plane. Compensates for point2cad's clipping leaving lobes
+    # attached when they don't cross another surface. Idempotency of
+    # normalize_points means mesh and xyzc share the same coordinate frame
+    # (we pre-normalised in export_xyzc).
+    posttrim_log_lines = []
+    if posttrim_distance_m and posttrim_distance_m > 0:
+        try:
+            import numpy as np
+            import trimesh
+            from scipy.spatial import cKDTree
+
+            clipped_ply = os.path.join(out_path, 'clipped', 'mesh.ply')
+            mesh = trimesh.load(clipped_ply, process=False)
+            n_faces_before = len(mesh.faces)
+
+            face_colors_attr = getattr(mesh.visual, 'face_colors', None)
+            if face_colors_attr is None or len(face_colors_attr) != n_faces_before:
+                raise RuntimeError(
+                    'Post-Trim: mesh hat keine Face-Colors — Source-Plane-Zuordnung '
+                    'nicht möglich. Wurde point2cad ohne save_clipped_meshes ausgeführt?'
+                )
+            face_colors = np.asarray(face_colors_attr)[:, :3].astype(np.int32)
+
+            data = np.loadtxt(xyzc_path)
+            inlier_points = data[:, :3].astype(np.float64)
+            inlier_labels = data[:, 3].astype(np.int32)
+            unique_pids = np.unique(inlier_labels)
+
+            face_centroids = mesh.vertices[mesh.faces].mean(axis=1)
+
+            plane_trees = {
+                int(pid): cKDTree(inlier_points[inlier_labels == pid])
+                for pid in unique_pids
+            }
+
+            # Threshold lives in the same normalised frame as the mesh — we
+            # divide the user's metric request by the export-time `scale`.
+            roof_entry = ProjectEntry.objects.filter(
+                project_id=project_id, task_id=task_id, entry_type='roof_outline'
+            ).first()
+            scale = None
+            if roof_entry:
+                xyzc_stats = (roof_entry.data or {}).get('xyzc_stats') or {}
+                scale = xyzc_stats.get('scale')
+
+            if not scale or scale <= 0:
+                posttrim_log_lines.append(
+                    'Post-Trim übersprungen: kein `scale` in xyzc_stats. '
+                    'Bitte RANSAC erneut ausführen, damit xyzc neu geschrieben wird.'
+                )
+            else:
+                threshold_norm = posttrim_distance_m / scale
+
+                # Group faces by RGB triple (alpha ignored).
+                color_to_face_indices = {}
+                for i in range(n_faces_before):
+                    key = (int(face_colors[i, 0]), int(face_colors[i, 1]),
+                           int(face_colors[i, 2]))
+                    color_to_face_indices.setdefault(key, []).append(i)
+
+                # Median-distance heuristic: for each colour, the source plane is
+                # the one whose inliers most face-centroids of that colour cluster
+                # around. Median is robust to a minority of lobe faces sitting in
+                # another plane's region.
+                color_to_plane = {}
+                for color, idxs in color_to_face_indices.items():
+                    centroids = face_centroids[idxs]
+                    best_pid = None
+                    best_med = float('inf')
+                    for pid, tree in plane_trees.items():
+                        d, _ = tree.query(centroids, k=1)
+                        med = float(np.median(d))
+                        if med < best_med:
+                            best_med = med
+                            best_pid = pid
+                    color_to_plane[color] = best_pid
+
+                keep_mask = np.ones(n_faces_before, dtype=bool)
+                for color, idxs in color_to_face_indices.items():
+                    pid = color_to_plane[color]
+                    if pid is None:
+                        continue
+                    tree = plane_trees[pid]
+                    centroids = face_centroids[idxs]
+                    distances, _ = tree.query(centroids, k=1)
+                    drop_local = distances >= threshold_norm
+                    for i_local, i_global in enumerate(idxs):
+                        if drop_local[i_local]:
+                            keep_mask[i_global] = False
+
+                n_dropped = int((~keep_mask).sum())
+                if n_dropped > 0:
+                    mesh.update_faces(keep_mask)
+                    mesh.remove_unreferenced_vertices()
+                    mesh.export(clipped_ply)
+                posttrim_log_lines.append(
+                    'Post-Trim: {} → {} Faces '
+                    '(threshold={:.2f} m / {:.4f} norm, scale={:.3f}), '
+                    '{} dropped'.format(
+                        n_faces_before, n_faces_before - n_dropped,
+                        posttrim_distance_m, threshold_norm, scale, n_dropped,
+                    )
+                )
+        except Exception as e:
+            posttrim_log_lines.append('Post-Trim fehlgeschlagen: {}'.format(e))
+
+    # Append post-trim summary to stdout so it shows up in the UI logs panel.
+    if posttrim_log_lines:
+        appended = '\n'.join(posttrim_log_lines)
+        logs = {
+            'stdout': (logs.get('stdout', '') + '\n' + appended)[-DB_LOG_LIMIT:],
+            'stderr': logs.get('stderr', ''),
+        }
+
     ProjectEntry.objects.create(
         project_id=project_id, task_id=task_id,
         entry_type='cad_result', title='Point2CAD Ergebnis',
@@ -391,6 +517,16 @@ class CADView(TaskView):
             )
         p2cad_args = {k: v for k, v in raw_args.items() if k in P2CAD_ARG_WHITELIST}
 
+        # Post-trim distance (in metres) — applied after point2cad finishes to
+        # remove mesh faces far from any inlier of their source plane.
+        try:
+            posttrim_distance_m = float(
+                request.data.get('posttrim_distance_m',
+                                  SETTING_DEFAULTS['posttrim_distance_m'])
+            )
+        except (TypeError, ValueError):
+            posttrim_distance_m = SETTING_DEFAULTS['posttrim_distance_m']
+
         try:
             celery_result = run_function_async(
                 _run_point2cad_task,
@@ -400,6 +536,7 @@ class CADView(TaskView):
                 P2CAD_SERVICE,
                 P2CAD_DATA,
                 p2cad_args,
+                posttrim_distance_m,
                 with_progress=True,
             )
             return Response({'celery_task_id': celery_result.task_id}, status=status.HTTP_200_OK)
