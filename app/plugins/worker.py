@@ -27,12 +27,8 @@ def eval_async(self, source, funcname, *args, **kwargs):
     eval(code, ns, ns)
 
     if kwargs.get("with_progress"):
-        def progress_callback(status, perc, **extra):
-            # Callers may forward arbitrary metadata via **extra (e.g. live log
-            # tails). Backward-compatible: existing 2-arg callers unaffected.
-            meta = {"status": status, "progress": perc}
-            meta.update(extra)
-            self.update_state(state="PROGRESS", meta=meta)
+        def progress_callback(status, perc):
+            self.update_state(state="PROGRESS", meta={"status": status, "progress": perc})
         kwargs['progress_callback'] = progress_callback
         del kwargs['with_progress']
 

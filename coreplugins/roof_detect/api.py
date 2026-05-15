@@ -117,9 +117,23 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
     DB_LOG_LIMIT = 10000   # cap per stream when storing in JSONField
     LIVE_LOG_TAIL = 4000   # chars per stream forwarded through progress meta
 
-    def _progress(msg, pct, **extra):
-        if progress_callback:
-            progress_callback(msg, pct, **extra)
+    def _progress(msg, pct, live_stdout=None, live_stderr=None):
+        # The shared `progress_callback` (app/plugins/worker.py) only accepts
+        # `(status, perc)` and is image-baked (not bind-mounted), so we cannot
+        # ship a signature change without a docker-compose down/up. Instead we
+        # JSON-encode the extra payload into the `status` string and unpack it
+        # on the read side (CADStatusView). Plain-string statuses still work.
+        if progress_callback is None:
+            return
+        if live_stdout is not None or live_stderr is not None:
+            payload = json.dumps({
+                'msg': msg,
+                'live_stdout': live_stdout or '',
+                'live_stderr': live_stderr or '',
+            })
+            progress_callback(payload, pct)
+        else:
+            progress_callback(msg, pct)
 
     _progress('Starte point2cad…', 2)
 
@@ -397,12 +411,28 @@ class CADStatusView(TaskView):
         if not res.ready():
             out = {'ready': False, 'status': res.state, 'progress': 0}
             if res.state == 'PROGRESS' and res.info:
-                out['status'] = res.info.get('status', res.state)
+                raw_status = res.info.get('status', res.state)
                 out['progress'] = res.info.get('progress', 0)
-                # Live log tails — set by _run_point2cad_task each poll so the
-                # frontend can render point2cad's current output while running.
-                out['live_stdout'] = res.info.get('live_stdout', '')
-                out['live_stderr'] = res.info.get('live_stderr', '')
+                # _run_point2cad_task JSON-encodes the status string when it
+                # has live log tails to forward (workaround for the image-baked
+                # progress_callback that only accepts (status, perc)). Decode
+                # here; fall back to plain string for older payloads / other
+                # task types.
+                import json as _json
+                parsed = None
+                if isinstance(raw_status, str) and raw_status.startswith('{'):
+                    try:
+                        parsed = _json.loads(raw_status)
+                    except (ValueError, TypeError):
+                        parsed = None
+                if isinstance(parsed, dict):
+                    out['status'] = parsed.get('msg', '')
+                    out['live_stdout'] = parsed.get('live_stdout', '')
+                    out['live_stderr'] = parsed.get('live_stderr', '')
+                else:
+                    out['status'] = raw_status
+                    out['live_stdout'] = ''
+                    out['live_stderr'] = ''
             return Response(out)
 
         try:
