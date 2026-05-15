@@ -24,6 +24,11 @@ SETTING_DEFAULTS = {
     # separate roof patches sharing a plane equation (e.g. ridge-cap streak
     # connecting dormers on opposite roof sides). 0 = disabled.
     'bridge_width': 0.0,        # m — erode away inlier corridors thinner than this
+    # Outlier-context filter: drops plane inliers whose XY-neighbourhood is
+    # dominated by points belonging to other planes. Removes "Verlängerung"-
+    # lobes where a plane equation extends into another roof patch's region.
+    # 0.0 = disabled; 0.5 = neighbourhood majority must be own plane.
+    'min_same_plane_ratio': 0.0,
 }
 
 

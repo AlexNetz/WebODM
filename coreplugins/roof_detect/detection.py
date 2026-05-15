@@ -354,6 +354,71 @@ def split_thin_bridges(planes, bridge_width=0.0, min_component_pts=15):
     return out
 
 
+def filter_outlier_context(planes, radius=0.20, min_same_plane_ratio=0.0,
+                           min_kept_pts=15):
+    """
+    Drop inliers whose XY neighbourhood is dominated by points from *other*
+    planes — RANSAC selects inliers by plane-equation distance only, so a flat
+    dormer plane equation is often satisfied by points belonging physically to
+    a completely different roof patch on the far side of the house. Those
+    "Verlängerung" points stay in the inlier set of the wrong plane and confuse
+    point2cad's INR fitting.
+
+    Algorithm:
+      1. Concatenate every plane's points → universe with plane-id labels.
+      2. One KDTree query per point (XY) returns its neighbour set.
+      3. For each plane Pi inlier: own-share = (# Pi neighbours) / (# neighbours).
+         If own-share < min_same_plane_ratio the inlier is a "boundary
+         trespasser" and gets removed.
+
+    Universe = union of *current* plane inliers only (NOT the raw point cloud).
+    Wall / vegetation / ground points were already discarded upstream; including
+    them would punish legitimate plane edges (a roof rim next to a wall has
+    many wall neighbours but is otherwise a clean plane point).
+
+    min_same_plane_ratio <= 0 disables this pass entirely (early-return).
+    """
+    if min_same_plane_ratio <= 0 or len(planes) < 2:
+        return list(planes)
+
+    from scipy.spatial import cKDTree
+
+    pts_list = [p.points for p in planes]
+    ids_list = [np.full(len(p.points), pid, dtype=np.int32)
+                for pid, p in enumerate(planes)]
+    universe_pts = np.vstack(pts_list)
+    universe_ids = np.concatenate(ids_list)
+
+    tree = cKDTree(universe_pts[:, :2])
+    # Batched neighbour lookup — one scipy call for all points.
+    all_neighbors = tree.query_ball_point(universe_pts[:, :2], r=radius)
+
+    out = []
+    offset = 0
+    for pid, plane in enumerate(planes):
+        n = len(plane.points)
+        keep_mask = np.zeros(n, dtype=bool)
+
+        for local_i in range(n):
+            neighbors = all_neighbors[offset + local_i]
+            total = len(neighbors)
+            if total <= 1:
+                # Self only — no context to judge, keep.
+                keep_mask[local_i] = True
+                continue
+            same = int(np.sum(universe_ids[neighbors] == pid))
+            if same / total >= min_same_plane_ratio:
+                keep_mask[local_i] = True
+
+        offset += n
+        kept = int(keep_mask.sum())
+        if kept >= min_kept_pts:
+            out.append(Plane(plane.normal, plane.d, plane.points[keep_mask]))
+        # Else: plane is discarded entirely (too few points survived).
+
+    return out
+
+
 def split_disjoint_planes(planes, split_gap=1.0, min_cluster_pts=15, min_samples=5):
     """
     Split each Plane into spatially-disjoint sub-planes via 2D-XY DBSCAN.
@@ -538,6 +603,7 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                   parallel_cos=0.97, max_gap=5.0,
                   split_gap=1.0, min_cluster_pts=15,
                   bridge_width=0.0,
+                  min_same_plane_ratio=0.0,
                   xyzc_out_path=None, clip_bounds=None, progress_callback=None):
     def _progress(msg, pct):
         if progress_callback:
@@ -644,6 +710,18 @@ def run_detection(laz_path, *, decimation_step=100, voxel_size=0.05,
                     visited[nb] = True
                     queue.append(nb)
         roof_planes = [roof_planes[i] for i in range(n) if visited[i]]
+
+    # 3. Outlier-context cleanup: drop inliers whose XY neighbourhood is
+    #    dominated by points from OTHER planes. Removes "Verlängerungs"-lobes
+    #    where a flat plane equation happens to be satisfied in a region that
+    #    physically belongs to a different roof patch. Disabled at 0.0.
+    if roof_planes and min_same_plane_ratio > 0:
+        roof_planes = filter_outlier_context(
+            roof_planes,
+            radius=0.20,
+            min_same_plane_ratio=min_same_plane_ratio,
+            min_kept_pts=min_cluster_pts,
+        )
 
     # For point2cad: only export sloped surfaces (exclude near-vertical walls).
     # Walls (|normal_z| < 0.05, within ~3° of vertical) bloat the surface count
