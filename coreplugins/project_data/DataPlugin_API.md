@@ -79,6 +79,7 @@ Der Token wird via `POST /api/token-auth/` bezogen und in `localStorage` als `ri
 | `waypoint` | Flugrouten-Wegpunkt | `{ lat: number, lng: number, altitude: number, index: number, name?: string, speed?: number, actions?: object[] }` |
 | `area_cutout` | Ausschnitt/Loch innerhalb einer Flächenmessung | `{ linked_measurement_uuid: string, points: [x,y,z][] }` (verknüpft mit `potree_scene.measurements[].uuid`) |
 | `alignment_transform` | Realignment-Matrix (3-Punkt-Methode), die im 3D-Viewer auf Punktwolke + Mesh angewendet wird | `{ points: [x,y,z][3], matrix: number[16], options: { reset_z_to_zero: boolean }, enabled: boolean }` (siehe TS-Interface unten) |
+| `roof_geometry` | Manuell erfasste Dachgeometrie (Template-basiert: Satteldach, Walmdach, Zeltdach, Schlepp-Gaube, Flachdach) | `{ elements: Array<{ id: string, template: 'gable'\|'hip'\|'pyramid'\|'shed'\|'flat', name?: string, points: [x,y,z][] }> }` — Flächen, Neigung, m² werden client-seitig aus den Punkten berechnet |
 
 ### ProjectEntryAttachment
 
@@ -289,7 +290,8 @@ export type EntryType =
   | 'area_cutout'
   | 'roof_outline'
   | 'cad_result'
-  | 'alignment_transform';
+  | 'alignment_transform'
+  | 'roof_geometry';
 
 export interface Attachment {
   id: string;

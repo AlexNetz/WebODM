@@ -1,5 +1,5 @@
 from app.plugins import PluginBase, MountPoint
-from .api import DetectView, DetectStatusView, ResultView, CADView, CADStatusView, CADResultView, CADMeshView
+from .api import DetectView, DetectStatusView, ResultView, CancelView, CADView, CADStatusView, CADResultView, CADMeshView
 
 
 class Plugin(PluginBase):
@@ -13,6 +13,13 @@ class Plugin(PluginBase):
             MountPoint(
                 'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/detect/result/$',
                 ResultView.as_view()
+            ),
+            # cancel-Route VOR der generischen status-Route (URL-Matching wertet
+            # in Reihenfolge aus; status-Pattern könnte sonst greifen wenn pkg
+            # geändert wird).
+            MountPoint(
+                'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/detect/(?P<celery_task_id>[^/.]+)/cancel/$',
+                CancelView.as_view()
             ),
             MountPoint(
                 'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/detect/(?P<celery_task_id>[^/.]+)/$',
@@ -30,6 +37,10 @@ class Plugin(PluginBase):
             MountPoint(
                 'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/cad/mesh/$',
                 CADMeshView.as_view()
+            ),
+            MountPoint(
+                'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/cad/(?P<celery_task_id>[^/.]+)/cancel/$',
+                CancelView.as_view()
             ),
             MountPoint(
                 'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/cad/(?P<celery_task_id>[^/.]+)/$',

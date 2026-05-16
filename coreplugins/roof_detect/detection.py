@@ -708,15 +708,152 @@ def _alpha_shape_2d(points_2d, alpha_threshold):
     return polylines
 
 
-def compute_outline_curves(xyzc_path, alpha_threshold_norm):
+def _douglas_peucker_2d(points_2d, epsilon):
     """
-    For each RANSAC plane label in the xyzc file, derive an outer-boundary
-    polyline via 2D alpha-shape in plane-local coordinates. Returned in the
-    same `{pv_points, pv_lines}` shape as point2cad's intersection curves so
-    the frontend can render both with one code path (just different colour).
+    Ramer-Douglas-Peucker line simplification on a 2D polyline (open path).
 
-    alpha_threshold_norm is in the normalised frame (same as xyzc and the mesh)
-    — caller converts metres-via-scale before calling.
+    Returns sorted indices into `points_2d` that survive the simplification.
+    Iterative (explicit stack) — handles polylines longer than Python's
+    default recursion limit (1000). Closed polylines (where the last index
+    repeats the first) should be split into two halves before being passed
+    here; helper `_simplify_polyline_2d` below handles both cases.
+    """
+    n = len(points_2d)
+    if n < 3:
+        return list(range(n))
+
+    keep = [False] * n
+    keep[0] = True
+    keep[-1] = True
+
+    stack = [(0, n - 1)]
+    while stack:
+        start, end = stack.pop()
+        if end <= start + 1:
+            continue
+        # Perpendicular distance of each point in (start, end) to the line
+        # through (points_2d[start], points_2d[end]).
+        a = points_2d[start]
+        b = points_2d[end]
+        ab = b - a
+        ab_len = np.linalg.norm(ab)
+        if ab_len < 1e-12:
+            # Degenerate segment — fall back to distance from endpoint.
+            seg = points_2d[start + 1:end] - a
+            dists = np.linalg.norm(seg, axis=1)
+        else:
+            seg = points_2d[start + 1:end] - a
+            cross = seg[:, 0] * ab[1] - seg[:, 1] * ab[0]
+            dists = np.abs(cross) / ab_len
+        if dists.size == 0:
+            continue
+        local_max = int(np.argmax(dists))
+        max_dist = float(dists[local_max])
+        if max_dist > epsilon:
+            split = start + 1 + local_max
+            keep[split] = True
+            stack.append((start, split))
+            stack.append((split, end))
+
+    return [i for i, k in enumerate(keep) if k]
+
+
+def _simplify_polyline_2d(points_2d, indices, epsilon):
+    """
+    Apply DP to a polyline given as `indices` into `points_2d`. Returns
+    a reduced list of indices. Handles closed polylines (first index equals
+    last) by splitting at the geometrically opposite vertex first, then
+    simplifying both halves independently.
+    """
+    if len(indices) < 3 or epsilon <= 0:
+        return list(indices)
+
+    is_closed = indices[0] == indices[-1]
+    pts = points_2d[indices]
+
+    if is_closed:
+        # Find the vertex farthest from the start — splits the loop into two
+        # roughly equal open paths so DP can simplify each independently.
+        d = np.linalg.norm(pts - pts[0], axis=1)
+        split = int(np.argmax(d))
+        if split == 0 or split == len(indices) - 1:
+            return list(indices)
+        first_half = _douglas_peucker_2d(pts[:split + 1], epsilon)
+        second_half = _douglas_peucker_2d(pts[split:], epsilon)
+        merged_local = first_half + [s + split for s in second_half[1:]]
+        return [indices[i] for i in merged_local]
+
+    local_keep = _douglas_peucker_2d(pts, epsilon)
+    return [indices[i] for i in local_keep]
+
+
+def _oriented_bounding_box_2d(points_2d):
+    """
+    Minimum-area oriented bounding box of a 2D point set via rotating calipers.
+
+    Returns a (4, 2) array of corner coordinates in counter-clockwise order,
+    or None if the input has fewer than 3 unique points or the convex hull
+    can't be computed.
+    """
+    from scipy.spatial import ConvexHull
+
+    if len(points_2d) < 3:
+        return None
+    try:
+        hull = ConvexHull(points_2d)
+    except Exception:
+        return None
+
+    hull_pts = points_2d[hull.vertices]
+    n_h = len(hull_pts)
+    if n_h < 2:
+        return None
+
+    best_area = float('inf')
+    best_corners = None
+    for i in range(n_h):
+        edge = hull_pts[(i + 1) % n_h] - hull_pts[i]
+        edge_len = np.linalg.norm(edge)
+        if edge_len < 1e-12:
+            continue
+        # Rotate hull so this edge aligns with X axis.
+        u = edge / edge_len
+        v = np.array([-u[1], u[0]])
+        R = np.stack([u, v], axis=0)              # 2×2 rotation
+        rotated = hull_pts @ R.T
+        min_xy = rotated.min(axis=0)
+        max_xy = rotated.max(axis=0)
+        area = float((max_xy[0] - min_xy[0]) * (max_xy[1] - min_xy[1]))
+        if area < best_area:
+            best_area = area
+            # Corners in rotated frame, then back-rotated.
+            corners_rot = np.array([
+                [min_xy[0], min_xy[1]],
+                [max_xy[0], min_xy[1]],
+                [max_xy[0], max_xy[1]],
+                [min_xy[0], max_xy[1]],
+            ])
+            best_corners = corners_rot @ R       # inverse of R.T is R for orthonormal
+
+    return best_corners
+
+
+def compute_outline_curves(xyzc_path, alpha_threshold_norm,
+                           simplify_norm=0.0, obb_mode=False):
+    """
+    For each RANSAC plane label in the xyzc file, derive outer-boundary
+    polylines and return them in the same `{pv_points, pv_lines}` shape as
+    point2cad's intersection curves.
+
+    Modes:
+      - obb_mode=True: replace the boundary with a 4-corner oriented bounding
+        box (minimum-area rotated rectangle). Clean, but only suitable for
+        rectangular planes.
+      - obb_mode=False (default): alpha-shape boundary, optionally simplified
+        via Douglas-Peucker with `simplify_norm` (set 0 to keep all vertices).
+
+    All thresholds are in the normalised frame (same as xyzc and the mesh);
+    caller converts metres-via-scale before calling.
     """
     data = np.loadtxt(xyzc_path)
     pts_all = data[:, :3].astype(np.float64)
@@ -743,9 +880,31 @@ def compute_outline_curves(xyzc_path, alpha_threshold_norm):
         pts_centered = pts - centroid
         pts_2d = np.column_stack([pts_centered @ u, pts_centered @ v])
 
+        if obb_mode:
+            corners_2d = _oriented_bounding_box_2d(pts_2d)
+            if corners_2d is None or len(corners_2d) < 3:
+                continue
+            # Lift synthetic OBB corners back to 3D via plane basis (not via
+            # inlier coords — corners are not original points).
+            corners_3d = (centroid
+                          + corners_2d[:, 0:1] * u
+                          + corners_2d[:, 1:2] * v)
+            n_corners = len(corners_3d)
+            # Closed loop: last segment back to corner 0.
+            segs = [[i, (i + 1) % n_corners] for i in range(n_corners)]
+            out_curves.append({
+                'pv_points': corners_3d.tolist(),
+                'pv_lines': segs,
+            })
+            continue
+
         polylines_2d_idx = _alpha_shape_2d(pts_2d, alpha_threshold_norm)
 
         for line_indices in polylines_2d_idx:
+            if simplify_norm and simplify_norm > 0 and len(line_indices) > 2:
+                line_indices = _simplify_polyline_2d(
+                    pts_2d, line_indices, simplify_norm,
+                )
             pts_3d = pts[line_indices]
             n_pts = len(pts_3d)
             segs = [[i, i + 1] for i in range(n_pts - 1)]

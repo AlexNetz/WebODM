@@ -44,6 +44,14 @@ P2CAD_PHASE_DEFAULTS = {
     # to add outer edges (eaves/gables) to topo.outline_curves alongside
     # point2cad's intersection curves. 0.0 disables outline computation.
     'outline_alpha_radius_m': 0.8,
+    # Outline simplify (m): Douglas-Peucker tolerance applied AFTER alpha-shape.
+    # Removes wavy noise from the boundary so the result reads as architectural
+    # straight lines with a few corners. 0 disables DP (keep raw alpha-shape).
+    'outline_simplify_m': 0.30,
+    # Outline OBB mode: replace each plane's alpha-shape boundary with a
+    # minimum-area oriented bounding box (rotated rectangle, 4 corners). Only
+    # sensible for rectangular planes. Overrides outline_simplify_m when True.
+    'outline_obb_mode': False,
 }
 
 
@@ -119,6 +127,7 @@ def _run_detection_task(laz_path, project_id, task_id, plugin_dir, settings, pro
 def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_data,
                         p2cad_args=None, posttrim_distance_m=0.30,
                         outline_alpha_radius_m=0.5,
+                        outline_simplify_m=0.30, outline_obb_mode=False,
                         progress_callback=None):
     """
     Celery worker function: calls the point2cad microservice and stores the result.
@@ -415,13 +424,24 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
                 from detection import compute_outline_curves
 
                 alpha_threshold_norm = outline_alpha_radius_m / scale_for_outline
-                outline_curves = compute_outline_curves(xyzc_path, alpha_threshold_norm)
+                simplify_norm = (outline_simplify_m / scale_for_outline
+                                 if outline_simplify_m and outline_simplify_m > 0
+                                 else 0.0)
+                outline_curves = compute_outline_curves(
+                    xyzc_path, alpha_threshold_norm,
+                    simplify_norm=simplify_norm,
+                    obb_mode=bool(outline_obb_mode),
+                )
                 topo['outline_curves'] = outline_curves
+                mode = ('OBB' if outline_obb_mode
+                        else 'DP simplify={:.2f} m / {:.4f} norm'.format(
+                            outline_simplify_m, simplify_norm,
+                        ))
                 outline_log_lines.append(
                     'Outline: {} Polylines '
-                    '(alpha_radius={:.2f} m / {:.4f} norm)'.format(
+                    '(alpha_radius={:.2f} m / {:.4f} norm, {})'.format(
                         len(outline_curves), outline_alpha_radius_m,
-                        alpha_threshold_norm,
+                        alpha_threshold_norm, mode,
                     )
                 )
         except Exception as e:
@@ -549,6 +569,24 @@ class ResultView(TaskView):
         return Response({'deleted': deleted}, status=status.HTTP_200_OK)
 
 
+class CancelView(TaskView):
+    """Revoked die Celery-Task mit dem gegebenen ID. Mit terminate=True schickt
+    der Worker SIGTERM an den Task-Prozess → die laufende Berechnung wird
+    abgebrochen. Generisch für detect- und cad-Tasks."""
+
+    def post(self, request, pk=None, project_pk=None, celery_task_id=None):
+        self.get_and_check_task(request, pk)
+        try:
+            res = TestSafeAsyncResult(celery_task_id)
+            res.revoke(terminate=True, signal='SIGTERM')
+            return Response({'cancelled': True}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 # ── point2cad views ────────────────────────────────────────────────────────────
 
 P2CAD_ARG_WHITELIST = {
@@ -596,6 +634,22 @@ class CADView(TaskView):
         except (TypeError, ValueError):
             outline_alpha_radius_m = P2CAD_PHASE_DEFAULTS['outline_alpha_radius_m']
 
+        # Outline simplify (m) — Douglas-Peucker tolerance applied after alpha
+        # shape. 0 disables DP, keep raw boundary.
+        try:
+            outline_simplify_m = float(
+                request.data.get('outline_simplify_m',
+                                  P2CAD_PHASE_DEFAULTS['outline_simplify_m'])
+            )
+        except (TypeError, ValueError):
+            outline_simplify_m = P2CAD_PHASE_DEFAULTS['outline_simplify_m']
+
+        # Outline OBB mode — replace alpha-shape boundary with oriented BB.
+        outline_obb_mode = bool(
+            request.data.get('outline_obb_mode',
+                              P2CAD_PHASE_DEFAULTS['outline_obb_mode'])
+        )
+
         try:
             celery_result = run_function_async(
                 _run_point2cad_task,
@@ -607,6 +661,8 @@ class CADView(TaskView):
                 p2cad_args,
                 posttrim_distance_m,
                 outline_alpha_radius_m,
+                outline_simplify_m,
+                outline_obb_mode,
                 with_progress=True,
             )
             return Response({'celery_task_id': celery_result.task_id}, status=status.HTTP_200_OK)
