@@ -141,6 +141,23 @@ class ExportDownloadView(TaskView):
         )
 
 
+class ExportFilesStatusView(TaskView):
+    """Returns which realigned export files exist for this task.
+
+    Used by AlignmentModal on mount to restore the LAZ/GLB download buttons
+    after a page refresh — the celery task ID is gone from frontend state,
+    but the produced files persist in assets/realigned/.
+    """
+
+    def get(self, request, pk=None, project_pk=None):
+        task = self.get_and_check_task(request, pk)
+        realigned_dir = task.assets_path('realigned')
+        return Response({
+            'laz': os.path.isfile(os.path.join(realigned_dir, 'model_realigned.laz')),
+            'glb': os.path.isfile(os.path.join(realigned_dir, 'model_realigned.glb')),
+        })
+
+
 class ApplyView(TaskView):
     """Triggers the apply Celery task: regenerates EPT and swaps files."""
 

@@ -1,6 +1,6 @@
 from app.plugins import PluginBase, MountPoint
 from .api import (
-    ExportView, ExportStatusView, ExportDownloadView,
+    ExportView, ExportStatusView, ExportDownloadView, ExportFilesStatusView,
     ApplyView, ApplyStatusView, RevertView,
 )
 
@@ -18,6 +18,12 @@ class Plugin(PluginBase):
             MountPoint(
                 'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/export/$',
                 ExportView.as_view(),
+            ),
+            # files/ route VOR der generischen status-Route — sonst greift
+            # die <celery_task_id>-Regex und "files" wird als Task-ID gelesen.
+            MountPoint(
+                'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/export/files/$',
+                ExportFilesStatusView.as_view(),
             ),
             MountPoint(
                 'project/(?P<project_pk>[^/.]+)/tasks/(?P<pk>[^/.]+)/export/download/(?P<kind>laz|glb)/$',
