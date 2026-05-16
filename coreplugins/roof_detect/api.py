@@ -39,6 +39,11 @@ P2CAD_PHASE_DEFAULTS = {
     # Compensates for point2cad's clipping leaving lobes attached when they
     # don't cross another surface. 0.0 disables post-trim.
     'posttrim_distance_m': 0.30,
+    # Outline alpha radius (m): max gap considered "inside" the plane footprint
+    # when computing the 2D alpha-shape boundary of each plane's inliers. Used
+    # to add outer edges (eaves/gables) to topo.outline_curves alongside
+    # point2cad's intersection curves. 0.0 disables outline computation.
+    'outline_alpha_radius_m': 0.5,
 }
 
 
@@ -113,6 +118,7 @@ def _run_detection_task(laz_path, project_id, task_id, plugin_dir, settings, pro
 
 def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_data,
                         p2cad_args=None, posttrim_distance_m=0.30,
+                        outline_alpha_radius_m=0.5,
                         progress_callback=None):
     """
     Celery worker function: calls the point2cad microservice and stores the result.
@@ -126,6 +132,10 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
     farther than this (in metres) from any inlier of their source plane get
     dropped. 0 or negative disables the post-trim. Compensates for point2cad's
     clipping leaving lobes attached when they don't cross another surface.
+
+    outline_alpha_radius_m: max circumradius (in metres) for the 2D alpha-shape
+    that produces outer-edge polylines per RANSAC plane. Stored under
+    `topo.outline_curves`. 0 or negative disables outline computation.
 
     On both SUCCESS and FAILURE, the latest stdout+stderr captured by the service
     are persisted to project_data so the frontend can show what point2cad logged.
@@ -375,9 +385,51 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
         except Exception as e:
             posttrim_log_lines.append('Post-Trim fehlgeschlagen: {}'.format(e))
 
-    # Append post-trim summary to stdout so it shows up in the UI logs panel.
-    if posttrim_log_lines:
-        appended = '\n'.join(posttrim_log_lines)
+    # ── Outline-Curves: Außenkanten via 2D-Alpha-Shape pro Plane ──────────
+    # Pro RANSAC-Plane Inlier in 2D-Plane-Local-Coords projizieren, Alpha-Shape
+    # bilden, Boundary-Polylines zurück nach 3D heben. Resultat parallel zu
+    # point2cad's `topo.curves` (Schnittlinien) als `topo.outline_curves`
+    # (Außenkanten). Frontend rendert sie in einer anderen Farbe.
+    outline_log_lines = []
+    if outline_alpha_radius_m and outline_alpha_radius_m > 0:
+        try:
+            roof_entry = ProjectEntry.objects.filter(
+                project_id=project_id, task_id=task_id, entry_type='roof_outline'
+            ).first()
+            scale_for_outline = None
+            if roof_entry:
+                stats_for_outline = (roof_entry.data or {}).get('xyzc_stats') or {}
+                scale_for_outline = stats_for_outline.get('scale')
+
+            if not scale_for_outline or scale_for_outline <= 0:
+                outline_log_lines.append(
+                    'Outline übersprungen: kein `scale` in xyzc_stats. '
+                    'Bitte RANSAC erneut ausführen, damit xyzc neu geschrieben wird.'
+                )
+            else:
+                # Lazy import detection — same pattern as _run_detection_task.
+                if plugin_dir not in sys.path:
+                    sys.path.insert(0, plugin_dir)
+                if 'detection' in sys.modules:
+                    del sys.modules['detection']
+                from detection import compute_outline_curves
+
+                alpha_threshold_norm = outline_alpha_radius_m / scale_for_outline
+                outline_curves = compute_outline_curves(xyzc_path, alpha_threshold_norm)
+                topo['outline_curves'] = outline_curves
+                outline_log_lines.append(
+                    'Outline: {} Polylines '
+                    '(alpha_radius={:.2f} m / {:.4f} norm)'.format(
+                        len(outline_curves), outline_alpha_radius_m,
+                        alpha_threshold_norm,
+                    )
+                )
+        except Exception as e:
+            outline_log_lines.append('Outline fehlgeschlagen: {}'.format(e))
+
+    # Append post-trim + outline summary to stdout so it shows up in the UI logs panel.
+    if posttrim_log_lines or outline_log_lines:
+        appended = '\n'.join(posttrim_log_lines + outline_log_lines)
         logs = {
             'stdout': (logs.get('stdout', '') + '\n' + appended)[-DB_LOG_LIMIT:],
             'stderr': logs.get('stderr', ''),
@@ -534,6 +586,16 @@ class CADView(TaskView):
         except (TypeError, ValueError):
             posttrim_distance_m = P2CAD_PHASE_DEFAULTS['posttrim_distance_m']
 
+        # Outline alpha radius (m) — controls the concavity of the 2D alpha-
+        # shape that produces outer-edge polylines for each plane.
+        try:
+            outline_alpha_radius_m = float(
+                request.data.get('outline_alpha_radius_m',
+                                  P2CAD_PHASE_DEFAULTS['outline_alpha_radius_m'])
+            )
+        except (TypeError, ValueError):
+            outline_alpha_radius_m = P2CAD_PHASE_DEFAULTS['outline_alpha_radius_m']
+
         try:
             celery_result = run_function_async(
                 _run_point2cad_task,
@@ -544,6 +606,7 @@ class CADView(TaskView):
                 P2CAD_DATA,
                 p2cad_args,
                 posttrim_distance_m,
+                outline_alpha_radius_m,
                 with_progress=True,
             )
             return Response({'celery_task_id': celery_result.task_id}, status=status.HTTP_200_OK)

@@ -622,6 +622,140 @@ def export_xyzc(planes, path):
     }
 
 
+# ── Alpha-Shape (Concave Hull) für Plane-Außenkanten ──────────────────────────
+
+def _alpha_shape_2d(points_2d, alpha_threshold):
+    """
+    Alpha-shape boundary of a 2D point set as ordered polylines.
+
+    Algorithm: Delaunay → keep triangles whose circumradius < alpha_threshold
+    → boundary edges (incident to exactly one kept triangle) → adjacency walk
+    into ordered polylines. Returns a list of index lists into points_2d.
+
+    alpha_threshold is the maximum circumradius. Small → tight concavity-aware
+    hull. Large → approaches convex hull. Triangles with degenerate area are
+    skipped.
+    """
+    from scipy.spatial import Delaunay
+    from collections import Counter
+
+    if len(points_2d) < 4:
+        return []
+
+    try:
+        tri = Delaunay(points_2d)
+    except Exception:
+        return []  # collinear / degenerate input
+
+    keep_simplices = []
+    for simplex in tri.simplices:
+        pa, pb, pc = points_2d[simplex]
+        a = np.linalg.norm(pb - pc)
+        b = np.linalg.norm(pa - pc)
+        c = np.linalg.norm(pa - pb)
+        s = 0.5 * (a + b + c)
+        area_sq = s * (s - a) * (s - b) * (s - c)
+        if area_sq <= 0:
+            continue
+        circum = (a * b * c) / (4.0 * np.sqrt(area_sq))
+        if circum < alpha_threshold:
+            keep_simplices.append(simplex)
+
+    if not keep_simplices:
+        return []
+
+    edge_counts = Counter()
+    for simplex in keep_simplices:
+        for i, j in ((0, 1), (1, 2), (2, 0)):
+            a, b = int(simplex[i]), int(simplex[j])
+            edge_counts[(min(a, b), max(a, b))] += 1
+    boundary_edges = [e for e, n in edge_counts.items() if n == 1]
+    if not boundary_edges:
+        return []
+
+    adj = {}
+    for a, b in boundary_edges:
+        adj.setdefault(a, []).append(b)
+        adj.setdefault(b, []).append(a)
+
+    visited_edges = set()
+    polylines = []
+    # Walk one polyline at a time. Start from any vertex whose edges aren't all
+    # visited yet. Follow neighbours, marking edges as we go.
+    for start in list(adj.keys()):
+        for nb in adj[start]:
+            edge_key = (min(start, nb), max(start, nb))
+            if edge_key in visited_edges:
+                continue
+            line = [start]
+            current = start
+            next_node = nb
+            while True:
+                edge_key = (min(current, next_node), max(current, next_node))
+                if edge_key in visited_edges:
+                    break
+                visited_edges.add(edge_key)
+                line.append(next_node)
+                # Pick the next neighbour that we haven't traversed yet.
+                neighbours = adj.get(next_node, [])
+                candidates = [n for n in neighbours
+                              if (min(next_node, n), max(next_node, n)) not in visited_edges]
+                if not candidates:
+                    break
+                current, next_node = next_node, candidates[0]
+            if len(line) > 1:
+                polylines.append(line)
+    return polylines
+
+
+def compute_outline_curves(xyzc_path, alpha_threshold_norm):
+    """
+    For each RANSAC plane label in the xyzc file, derive an outer-boundary
+    polyline via 2D alpha-shape in plane-local coordinates. Returned in the
+    same `{pv_points, pv_lines}` shape as point2cad's intersection curves so
+    the frontend can render both with one code path (just different colour).
+
+    alpha_threshold_norm is in the normalised frame (same as xyzc and the mesh)
+    — caller converts metres-via-scale before calling.
+    """
+    data = np.loadtxt(xyzc_path)
+    pts_all = data[:, :3].astype(np.float64)
+    labels = data[:, 3].astype(np.int32)
+
+    out_curves = []
+    for pid in np.unique(labels):
+        pts = pts_all[labels == pid]
+        if len(pts) < 4:
+            continue
+
+        # Plane fit via SVD: smallest singular vector = surface normal.
+        centroid = pts.mean(0)
+        _, _, Vt = np.linalg.svd(pts - centroid, full_matrices=False)
+        normal = Vt[-1]
+
+        # Orthonormal in-plane basis (u, v) perpendicular to the normal.
+        ref = (np.array([0.0, 0.0, 1.0])
+               if abs(normal[2]) < 0.9 else np.array([1.0, 0.0, 0.0]))
+        u = np.cross(normal, ref)
+        u /= (np.linalg.norm(u) + 1e-12)
+        v = np.cross(normal, u)
+
+        pts_centered = pts - centroid
+        pts_2d = np.column_stack([pts_centered @ u, pts_centered @ v])
+
+        polylines_2d_idx = _alpha_shape_2d(pts_2d, alpha_threshold_norm)
+
+        for line_indices in polylines_2d_idx:
+            pts_3d = pts[line_indices]
+            n_pts = len(pts_3d)
+            segs = [[i, i + 1] for i in range(n_pts - 1)]
+            out_curves.append({
+                'pv_points': pts_3d.tolist(),
+                'pv_lines': segs,
+            })
+    return out_curves
+
+
 def make_preview_points(planes, step=15):
     """Return downsampled coloured point cloud normalised to [-1,1] for Three.js."""
     pts_list, ids_list = [], []
