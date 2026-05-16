@@ -210,7 +210,7 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
 
     # Poll status (max 40 min). st is the most-recent payload received.
     st = None
-    for i in range(480):
+    for i in range(1200):
         time.sleep(5)
         try:
             with urllib.request.urlopen(

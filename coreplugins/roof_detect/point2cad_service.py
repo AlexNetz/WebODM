@@ -104,21 +104,29 @@ def _run(task_id, xyzc_path, out_path, p2cad_args=None):
     # Popen + reader threads so /status/<task_id> returns live stdout/stderr
     # while point2cad is still running (subprocess.run with capture_output
     # buffers everything until exit — invisible to the client).
+    # Binärmodus + manuelles Decode: tqdm-Progressbars verwenden `\r` zum
+    # In-Place-Überschreiben ohne `\n`. readline() würde dort blockieren bis
+    # zur ersten echten Newline (oft erst nach Minuten) — der Live-Log bleibt
+    # leer. Mit raw-bytes-read + `\r`→`\n`-Normalisierung werden die tqdm-
+    # Updates sofort sichtbar.
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=out_path,
         env=env,
-        bufsize=1,        # line-buffered text mode
-        text=True,
+        bufsize=0,        # unbuffered raw bytes
     )
 
     def _reader(stream, key):
-        # Append each line to jobs[task_id][key], trimmed to LOG_LIMIT chars.
-        # GIL makes single-string-append atomic enough for this use case.
-        for line in iter(stream.readline, ''):
-            buf = jobs[task_id][key] + line
+        # Reads up-to-256-byte chunks (returns whatever is currently available,
+        # blocks only on empty buffer). \r→\n so tqdm bars become visible.
+        while True:
+            chunk = stream.read(256)
+            if not chunk:
+                break
+            text = chunk.decode('utf-8', errors='replace').replace('\r', '\n')
+            buf = jobs[task_id][key] + text
             if len(buf) > LOG_LIMIT:
                 buf = buf[-LOG_LIMIT:]
             jobs[task_id][key] = buf
