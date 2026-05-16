@@ -43,7 +43,7 @@ P2CAD_PHASE_DEFAULTS = {
     # when computing the 2D alpha-shape boundary of each plane's inliers. Used
     # to add outer edges (eaves/gables) to topo.outline_curves alongside
     # point2cad's intersection curves. 0.0 disables outline computation.
-    'outline_alpha_radius_m': 0.5,
+    'outline_alpha_radius_m': 0.8,
 }
 
 
