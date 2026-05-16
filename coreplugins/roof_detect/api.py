@@ -186,12 +186,39 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
             '. Bitte zuerst RANSAC-Erkennung ausführen.'
         )
 
+    # Eigene Celery-Task-ID an den Sidecar mitgeben — der Sidecar verwendet sie
+    # als seine task_id, sodass CancelView später per POST /cancel/<celery_id>
+    # den richtigen subprocess killen kann.
+    try:
+        from celery import current_task as _celery_current_task
+        celery_task_id = (_celery_current_task.request.id
+                          if _celery_current_task else None)
+    except Exception:
+        celery_task_id = None
+
+    def _cancel_sidecar(p2cad_id):
+        """Best-effort: schickt POST /cancel an den Sidecar — wird auf Timeout
+        oder Exception im Poll-Loop aufgerufen, damit kein Zombie-Subprocess
+        überlebt."""
+        try:
+            cancel_req = urllib.request.Request(
+                '{}/cancel/{}'.format(p2cad_service, p2cad_id),
+                data=b'', method='POST',
+            )
+            with urllib.request.urlopen(cancel_req, timeout=5):
+                pass
+        except Exception:
+            pass
+
     # Trigger point2cad service
-    body = json.dumps({
+    run_body = {
         'xyzc_path': xyzc_path,
         'out_path':  out_path,
         'p2cad_args': p2cad_args or {},
-    }).encode()
+    }
+    if celery_task_id:
+        run_body['task_id'] = celery_task_id
+    body = json.dumps(run_body).encode()
     req = urllib.request.Request(
         '{}/run'.format(p2cad_service),
         data=body,
@@ -208,33 +235,41 @@ def _run_point2cad_task(project_id, task_id, plugin_dir, p2cad_service, p2cad_da
 
     _progress('point2cad läuft…', 5)
 
-    # Poll status (max 40 min). st is the most-recent payload received.
+    # Poll status (max ~100 min: 1200 * 5s). st is the most-recent payload.
+    # try/finally garantiert: bei TimeoutError oder anderen Exceptions im Loop
+    # wird der Sidecar-Subprocess best-effort gekillt — vermeidet Zombie-Jobs.
     st = None
-    for i in range(1200):
-        time.sleep(5)
-        try:
-            with urllib.request.urlopen(
-                '{}/status/{}'.format(p2cad_service, p2cad_task_id), timeout=10
-            ) as resp:
-                st = json.loads(resp.read())
-        except Exception:
-            continue  # transient network error — keep polling
+    poll_completed = False
+    try:
+        for i in range(1200):
+            time.sleep(5)
+            try:
+                with urllib.request.urlopen(
+                    '{}/status/{}'.format(p2cad_service, p2cad_task_id), timeout=10
+                ) as resp:
+                    st = json.loads(resp.read())
+            except Exception:
+                continue  # transient network error — keep polling
 
-        if st.get('done'):
-            break
+            if st.get('done'):
+                poll_completed = True
+                break
 
-        # Forward live log tails to the frontend through Celery progress meta.
-        # Frontend shows the latest stderr/stdout snippets so a stalled 90 %
-        # bar isn't a black box.
-        pct = min(90, 5 + int(i * 85 / 200))
-        live_stdout = (st.get('stdout') or '')[-LIVE_LOG_TAIL:]
-        live_stderr = (st.get('stderr') or '')[-LIVE_LOG_TAIL:]
-        _progress(
-            'Verarbeite Flächen… ({}s)'.format(i * 5), pct,
-            live_stdout=live_stdout, live_stderr=live_stderr,
-        )
-    else:
-        raise TimeoutError('point2cad timed out after 40 minutes')
+            # Forward live log tails to the frontend through Celery progress meta.
+            # Frontend shows the latest stderr/stdout snippets so a stalled 90 %
+            # bar isn't a black box.
+            pct = min(90, 5 + int(i * 85 / 200))
+            live_stdout = (st.get('stdout') or '')[-LIVE_LOG_TAIL:]
+            live_stderr = (st.get('stderr') or '')[-LIVE_LOG_TAIL:]
+            _progress(
+                'Verarbeite Flächen… ({}s)'.format(i * 5), pct,
+                live_stdout=live_stdout, live_stderr=live_stderr,
+            )
+        else:
+            raise TimeoutError('point2cad timed out after ~100 minutes')
+    finally:
+        if not poll_completed:
+            _cancel_sidecar(p2cad_task_id)
 
     # Capture logs regardless of success/failure
     logs = {
@@ -572,10 +607,30 @@ class ResultView(TaskView):
 class CancelView(TaskView):
     """Revoked die Celery-Task mit dem gegebenen ID. Mit terminate=True schickt
     der Worker SIGTERM an den Task-Prozess → die laufende Berechnung wird
-    abgebrochen. Generisch für detect- und cad-Tasks."""
+    abgebrochen. Generisch für detect- und cad-Tasks.
+
+    Bei CAD-Tasks: VOR dem Celery-revoke wird der point2cad-Sidecar via
+    POST /cancel/<celery_task_id> gepingt — das tötet den subprocess samt
+    multiprocessing-Kindern (process-group SIGTERM/SIGKILL). Für detect-Tasks
+    ist die ID dem Sidecar unbekannt → 404, no-op. Reihenfolge wichtig: erst
+    Sidecar (synchron, wartet bis SIGTERM raus ist), dann Celery-revoke.
+    Würde man's umgekehrt machen, könnte der Celery-Worker sterben bevor er
+    den Sidecar-Cancel-Pfad in seinem try/finally erreicht."""
 
     def post(self, request, pk=None, project_pk=None, celery_task_id=None):
         self.get_and_check_task(request, pk)
+        import urllib.request
+        import urllib.error
+        try:
+            cancel_req = urllib.request.Request(
+                '{}/cancel/{}'.format(P2CAD_SERVICE, celery_task_id),
+                data=b'', method='POST',
+            )
+            with urllib.request.urlopen(cancel_req, timeout=5):
+                pass
+        except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, OSError):
+            pass  # Sidecar nicht erreichbar oder Task unbekannt — Revoke trotzdem versuchen.
+
         try:
             res = TestSafeAsyncResult(celery_task_id)
             res.revoke(terminate=True, signal='SIGTERM')

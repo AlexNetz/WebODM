@@ -3,8 +3,10 @@ Minimal HTTP service wrapping the point2cad CLI.
 Mounted into the point2cad container, started via docker-compose command override.
 
 Endpoints:
-  POST /run    {"xyzc_path": "...", "out_path": "...", "p2cad_args": {...}}
+  POST /run            {"xyzc_path": "...", "out_path": "...",
+                        "p2cad_args": {...}, "task_id": "<optional>"}
                                                         → {"task_id": "..."}
+  POST /cancel/<id>                                     → {"cancelled": bool}
   GET  /status/<task_id>                                → {"done": bool, "success": bool,
                                                             "error": str|null,
                                                             "stdout": str, "stderr": str}
@@ -14,7 +16,7 @@ p2cad_args (alle optional, durchgereicht als CLI-Flags an point2cad.main):
 """
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import json, subprocess, threading, uuid, os, sys
+import json, signal, subprocess, threading, time, uuid, os, sys
 
 jobs = {}  # task_id → {done, success, error, stdout, stderr}
 
@@ -30,17 +32,62 @@ P2CAD_ARG_WHITELIST = {
 LOG_LIMIT = 30000
 
 
+def _kill_job(task_id):
+    """Sendet SIGTERM an die process-group des subprocess, eskaliert auf SIGKILL
+    nach 5s falls noch nicht beendet. Tötet so auch alle multiprocessing-Kinder
+    (PGID = parent.pid wegen start_new_session=True)."""
+    job = jobs.get(task_id)
+    if not job:
+        return False, 'unknown task'
+    proc = job.get('proc')
+    if proc is None:
+        return True, 'not yet started'
+    if proc.poll() is not None:
+        return True, 'already exited'
+    job['cancelled'] = True
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError) as e:
+        return True, 'killpg SIGTERM failed: {}'.format(e)
+
+    def _escalate():
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    threading.Thread(target=_escalate, daemon=True).start()
+    return True, 'SIGTERM sent'
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        parts = self.path.strip('/').split('/')
+        if parts[0] == 'run' and len(parts) == 1:
+            self._handle_run()
+        elif parts[0] == 'cancel' and len(parts) == 2:
+            self._handle_cancel(parts[1])
+        else:
+            self._respond(404, {'error': 'not found'})
+
+    def _handle_run(self):
         length = int(self.headers.get('Content-Length', 0))
         body = json.loads(self.rfile.read(length))
         xyzc_path = body['xyzc_path']
         out_path = body['out_path']
         p2cad_args = body.get('p2cad_args') or {}
-        task_id = str(uuid.uuid4())
+        # Optionale ID vom Caller — erlaubt es webapp/Celery, ihre eigene
+        # task_id konsistent zu verwenden (für Cancel-Routing). Fallback uuid.
+        task_id = body.get('task_id') or str(uuid.uuid4())
+        if task_id in jobs and not jobs[task_id].get('done'):
+            self._respond(409, {'error': 'task already running'})
+            return
         jobs[task_id] = {
             'done': False, 'success': False, 'error': None,
             'stdout': '', 'stderr': '',
+            'proc': None, 'cancelled': False,
         }
         threading.Thread(
             target=_run,
@@ -49,11 +96,23 @@ class Handler(BaseHTTPRequestHandler):
         ).start()
         self._respond(201, {'task_id': task_id})
 
+    def _handle_cancel(self, task_id):
+        ok, note = _kill_job(task_id)
+        if not ok:
+            self._respond(404, {'cancelled': False, 'error': note})
+        else:
+            self._respond(200, {'cancelled': True, 'note': note})
+
     def do_GET(self):
         parts = self.path.strip('/').split('/')
         if len(parts) == 2 and parts[0] == 'status':
             task_id = parts[1]
-            self._respond(200, jobs.get(task_id, {'done': False, 'success': False, 'error': 'unknown task'}))
+            job = jobs.get(task_id)
+            if not job:
+                self._respond(200, {'done': False, 'success': False, 'error': 'unknown task'})
+                return
+            # Filter intern-fields aus der HTTP-Response (proc-Objekt ist nicht JSON-fähig).
+            self._respond(200, {k: v for k, v in job.items() if k != 'proc'})
         elif self.path == '/health':
             self._respond(200, {'ok': True})
         else:
@@ -101,6 +160,12 @@ def _run(task_id, xyzc_path, out_path, p2cad_args=None):
         if k in P2CAD_ARG_WHITELIST and v is not None:
             cmd.extend(['--{}'.format(k), str(v)])
 
+    # Diagnose: logge das exakte Command in den Container-stdout. Sichtbar via
+    # `docker compose logs point2cad`. Hilfreich wenn die Args nicht greifen
+    # (z.B. point2cad's argparse interpretiert --foo 0 als truthy bei type=bool).
+    print('[point2cad] task {} cmd: {}'.format(task_id, ' '.join(cmd)), flush=True)
+    print('[point2cad] task {} p2cad_args raw: {!r}'.format(task_id, p2cad_args), flush=True)
+
     # Popen + reader threads so /status/<task_id> returns live stdout/stderr
     # while point2cad is still running (subprocess.run with capture_output
     # buffers everything until exit — invisible to the client).
@@ -109,6 +174,9 @@ def _run(task_id, xyzc_path, out_path, p2cad_args=None):
     # zur ersten echten Newline (oft erst nach Minuten) — der Live-Log bleibt
     # leer. Mit raw-bytes-read + `\r`→`\n`-Normalisierung werden die tqdm-
     # Updates sofort sichtbar.
+    # start_new_session=True: subprocess wird Session-Leader, PGID = PID. Damit
+    # können wir die gesamte process-group (inkl. multiprocessing-Kindern) per
+    # os.killpg() terminieren, wenn /cancel/<task_id> aufgerufen wird.
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -116,7 +184,9 @@ def _run(task_id, xyzc_path, out_path, p2cad_args=None):
         cwd=out_path,
         env=env,
         bufsize=0,        # unbuffered raw bytes
+        start_new_session=True,
     )
+    jobs[task_id]['proc'] = proc
 
     def _reader(stream, key):
         # Reads up-to-256-byte chunks (returns whatever is currently available,
@@ -141,17 +211,28 @@ def _run(task_id, xyzc_path, out_path, p2cad_args=None):
     t_out.join(timeout=2)
     t_err.join(timeout=2)
 
-    success = rc == 0
+    cancelled = jobs[task_id].get('cancelled', False)
+    success = rc == 0 and not cancelled
     stdout = jobs[task_id]['stdout']
     stderr = jobs[task_id]['stderr']
+    if cancelled:
+        error_msg = 'cancelled by user (SIGTERM, rc={})'.format(rc)
+    elif not success:
+        error_msg = stderr or 'process exited with code {}'.format(rc)
+    else:
+        error_msg = None
     jobs[task_id] = {
         'done': True,
         'success': success,
-        'error': stderr if not success else None,
+        'cancelled': cancelled,
+        'error': error_msg,
         'stdout': stdout,
         'stderr': stderr,
+        'proc': None,
     }
-    if not success:
+    if cancelled:
+        print('[point2cad] task {} CANCELLED'.format(task_id), flush=True)
+    elif not success:
         print('[point2cad] task {} FAILED:\n{}'.format(task_id, stderr), flush=True)
     else:
         print('[point2cad] task {} done'.format(task_id), flush=True)
