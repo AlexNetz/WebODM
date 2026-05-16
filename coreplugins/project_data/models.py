@@ -17,6 +17,7 @@ class ProjectEntry(models.Model):
     CAD_RESULT = 'cad_result'
     ALIGNMENT_TRANSFORM = 'alignment_transform'
     ROOF_GEOMETRY = 'roof_geometry'
+    FIXED_MEASUREMENTS = 'fixed_measurements'
 
     ENTRY_TYPES = [
         (ANNOTATION, 'Annotation'),
@@ -31,6 +32,7 @@ class ProjectEntry(models.Model):
         (CAD_RESULT, 'CAD Result'),
         (ALIGNMENT_TRANSFORM, 'Alignment Transform'),
         (ROOF_GEOMETRY, 'Roof Geometry'),
+        (FIXED_MEASUREMENTS, 'Fixed Measurements'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
