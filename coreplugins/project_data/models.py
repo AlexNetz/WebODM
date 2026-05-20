@@ -18,6 +18,8 @@ class ProjectEntry(models.Model):
     ALIGNMENT_TRANSFORM = 'alignment_transform'
     ROOF_GEOMETRY = 'roof_geometry'
     FIXED_MEASUREMENTS = 'fixed_measurements'
+    USER_SCENE = 'user_scene'              # per-User Annotations/Measurements/View (Roof-S multi-tenant)
+    TASK_SETTINGS = 'task_settings'        # per-Task flags wie {global: true} (Roof-S admin override)
 
     ENTRY_TYPES = [
         (ANNOTATION, 'Annotation'),
@@ -33,6 +35,8 @@ class ProjectEntry(models.Model):
         (ALIGNMENT_TRANSFORM, 'Alignment Transform'),
         (ROOF_GEOMETRY, 'Roof Geometry'),
         (FIXED_MEASUREMENTS, 'Fixed Measurements'),
+        (USER_SCENE, 'User Scene'),
+        (TASK_SETTINGS, 'Task Settings'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
