@@ -8,6 +8,7 @@ services:
       - ./coreplugins/project_data:/webodm/coreplugins/project_data:ro
       - ./coreplugins/roof_detect:/webodm/coreplugins/roof_detect:ro
       - ./coreplugins/realign:/webodm/coreplugins/realign
+      - ./app/api/potree.py:/webodm/app/api/potree.py:ro       # Roof-S per-user scene patch
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
       - point2cad_data:/data   # shared with point2cad service — CADMeshView reads mesh.ply from here
@@ -17,6 +18,7 @@ services:
       - ./coreplugins/project_data:/webodm/coreplugins/project_data:ro
       - ./coreplugins/roof_detect:/webodm/coreplugins/roof_detect:ro
       - ./coreplugins/realign:/webodm/coreplugins/realign
+      - ./app/api/potree.py:/webodm/app/api/potree.py:ro       # Roof-S per-user scene patch
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
       - point2cad_data:/data   # shared with point2cad service
