@@ -37,10 +37,24 @@ class EntryListView(APIView):
         return Response(serializer.data)
 
     def post(self, request, project_pk=None):
-        project = get_and_check_project(request, project_pk, perms=('change_project',))
+        # Roof-S Per-User-Modell: jeder authenticated User darf in einem für ihn
+        # sichtbaren Projekt eigene Entries anlegen. `created_by` wird hier
+        # serverseitig auf request.user gepinnt, ein User kann also nicht für
+        # andere User schreiben. Damit ist `view_project` ausreichend statt
+        # `change_project` (was nur den Projekt-Owner ranlässt).
+        project = get_and_check_project(request, project_pk, perms=('view_project',))
 
         # Support multipart (with optional file) and JSON
         data = request.data
+
+        # task_settings (admin-only): nur is_superuser darf Tasks global flippen.
+        # Sonst könnte jeder authentifizierte User per Direkt-POST den
+        # Global-Mode für einen Task forcen und damit shared State erzwingen.
+        entry_type = data.get('entry_type') if hasattr(data, 'get') else None
+        if entry_type == 'task_settings' and not request.user.is_superuser:
+            from rest_framework import exceptions
+            raise exceptions.PermissionDenied(detail="Admin permission required for task_settings.")
+
         write_serializer = ProjectEntryWriteSerializer(data=data)
         if not write_serializer.is_valid():
             return Response(write_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -76,15 +90,36 @@ class EntryDetailView(APIView):
     parser_classes = [MultiPartParser, JSONParser]
 
     def _get_entry(self, request, project_pk, entry_pk, write=False):
-        perms = ('change_project',) if write else ('view_project',)
-        project = get_and_check_project(request, project_pk, perms=perms)
+        # Roof-S Per-User-Modell: `view_project` reicht für alle Operations.
+        # Owner-Check (write nur durch created_by-Eigentümer) erfolgt in
+        # `_assert_owner` weiter unten — das verhindert dass User mit
+        # view_project-Permission fremde Entries via Detail-View manipulieren.
+        project = get_and_check_project(request, project_pk, perms=('view_project',))
         try:
-            return ProjectEntry.objects.select_related('created_by').prefetch_related('attachments').get(
+            entry = ProjectEntry.objects.select_related('created_by').prefetch_related('attachments').get(
                 pk=entry_pk, project=project
             )
         except ProjectEntry.DoesNotExist:
             from rest_framework import exceptions
             raise exceptions.NotFound()
+        if write:
+            self._assert_owner(request, entry)
+        return entry
+
+    @staticmethod
+    def _assert_owner(request, entry):
+        """Schreibzugriff (PUT/PATCH/DELETE) nur durch den Owner.
+        Admins (is_superuser) dürfen alles — gewollt für die Wartung.
+        Legacy-Entries ohne created_by (created_by is NULL) sind frei
+        editierbar — passiert nur bei alten Daten vor dem Per-User-Modell.
+        """
+        from rest_framework import exceptions
+        if request.user.is_superuser:
+            return
+        if entry.created_by_id is None:
+            return
+        if entry.created_by_id != request.user.id:
+            raise exceptions.NotFound()   # Konsistent mit check_project_perms (404 statt 403)
 
     def get(self, request, project_pk=None, entry_pk=None):
         entry = self._get_entry(request, project_pk, entry_pk)
@@ -129,12 +164,14 @@ class AttachView(APIView):
     parser_classes = [MultiPartParser]
 
     def post(self, request, project_pk=None, entry_pk=None):
-        get_and_check_project(request, project_pk, perms=('change_project',))
+        # Roof-S Per-User-Modell — view_project genügt; Owner-Check via _assert_owner.
+        get_and_check_project(request, project_pk, perms=('view_project',))
         try:
             entry = ProjectEntry.objects.get(pk=entry_pk, project_id=project_pk)
         except ProjectEntry.DoesNotExist:
             from rest_framework import exceptions
             raise exceptions.NotFound()
+        EntryDetailView._assert_owner(request, entry)
 
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided.'}, status=status.HTTP_400_BAD_REQUEST)
