@@ -20,6 +20,7 @@ class ProjectEntry(models.Model):
     FIXED_MEASUREMENTS = 'fixed_measurements'
     USER_SCENE = 'user_scene'              # per-User Annotations/Measurements/View (Roof-S multi-tenant)
     TASK_SETTINGS = 'task_settings'        # per-Task flags wie {global: true} (Roof-S admin override)
+    HEATMAP = 'heatmap'                    # PV-Verschattungs-Heatmap (GLB als Attachment, Meta in data)
 
     ENTRY_TYPES = [
         (ANNOTATION, 'Annotation'),
@@ -37,6 +38,7 @@ class ProjectEntry(models.Model):
         (FIXED_MEASUREMENTS, 'Fixed Measurements'),
         (USER_SCENE, 'User Scene'),
         (TASK_SETTINGS, 'Task Settings'),
+        (HEATMAP, 'Heatmap'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
