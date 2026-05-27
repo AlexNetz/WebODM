@@ -11,6 +11,7 @@ services:
       - ./app/api/potree.py:/webodm/app/api/potree.py:ro       # Roof-S per-user scene patch
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
+      - ./app/plugins/views.py:/webodm/app/plugins/views.py:ro  # Roof-S csrf_exempt patch (JWT-POST über Plugin)
       - point2cad_data:/data   # shared with point2cad service — CADMeshView reads mesh.ply from here
   worker:
     entrypoint: /bin/bash -c "pip install laspy pygltflib trimesh -q && /webodm/wait-for-postgres.sh db /webodm/wait-for-it.sh -t 0 broker:6379 -- /webodm/wait-for-it.sh -t 0 webapp:8000 -- /webodm/worker.sh start"
@@ -21,6 +22,7 @@ services:
       - ./app/api/potree.py:/webodm/app/api/potree.py:ro       # Roof-S per-user scene patch
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
+      - ./app/plugins/views.py:/webodm/app/plugins/views.py:ro  # Roof-S csrf_exempt patch (JWT-POST über Plugin)
       - point2cad_data:/data   # shared with point2cad service
 
   # point2cad microservice — requires image to be available on the host:
