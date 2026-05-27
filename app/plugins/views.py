@@ -6,6 +6,7 @@ from app.api.workers import GetTaskResult as GetTaskResult
 from app.api.workers import TaskResultOutputError
 
 from django.http import HttpResponse, Http404
+from django.views.decorators.csrf import csrf_exempt
 from .functions import get_plugin_by_name, get_active_plugins
 from django.conf.urls import url
 from django.views.static import serve
@@ -20,6 +21,7 @@ def try_resolve_url(request, url):
     else:
         return (None, None, None)
 
+@csrf_exempt
 def app_view_handler(request, plugin_name=None):
     plugin = get_plugin_by_name(plugin_name) # TODO: this pings the server, which might be bad for performance with very large amount of files
     if plugin is None:
@@ -45,6 +47,7 @@ def app_view_handler(request, plugin_name=None):
     raise Http404("No valid routes")
 
 
+@csrf_exempt
 def api_view_handler(request, plugin_name=None):
     plugin = get_plugin_by_name(plugin_name) # TODO: this pings the server, which might be bad for performance with very large amount of files
     if plugin is None:
