@@ -197,20 +197,28 @@ def _run_apply_task(project_id_str, task_id_str, assets_root, realigned_dir, pro
 
     _progress('Sichere Original-Dateien…', 60)
 
-    # 2. Backups — idempotent.
-    # If ept_backup exists, the current ept_target is already a realigned version
-    # from a previous apply. Discard it.
+    # Trash-Pfad fürs nachgelagerte Löschen des alten Octrees. rename() ist auf
+    # demselben Filesystem instant+atomar; das evtl. langsame rmtree passiert ERST,
+    # nachdem der Live-Zustand bereits korrekt ist → ein Abbruch dort kann keinen
+    # Drift mehr erzeugen (kostet nur Plattenplatz).
+    ept_trash = ept_target + '.replacing'
+    if os.path.isdir(ept_trash):
+        shutil.rmtree(ept_trash, ignore_errors=True)  # Reste eines abgebrochenen Laufs
+
+    # 2. Backups — idempotent. ept_backup/glb_backup halten IMMER das Original
+    # (nur beim ersten Apply angelegt). Bei Re-Apply wird der aktuelle (bereits
+    # realignte) Live-Stand per rename in den Trash geschoben statt synchron gelöscht.
     if os.path.isdir(ept_backup):
         if os.path.isdir(ept_target):
-            shutil.rmtree(ept_target)
+            os.rename(ept_target, ept_trash)
     elif os.path.isdir(ept_target):
-        shutil.move(ept_target, ept_backup)
+        os.rename(ept_target, ept_backup)
 
     if os.path.isfile(glb_backup):
         if os.path.isfile(glb_target):
             os.remove(glb_target)
     elif os.path.isfile(glb_target):
-        shutil.move(glb_target, glb_backup)
+        os.rename(glb_target, glb_backup)
 
     _progress('Tausche Dateien…', 80)
 
@@ -222,8 +230,19 @@ def _run_apply_task(project_id_str, task_id_str, assets_root, realigned_dir, pro
         os.makedirs(os.path.dirname(glb_target), exist_ok=True)
         shutil.copy2(realigned_glb, glb_target)
 
-    # 4. Update project_data alignment_transform.applied = True
-    _progress('Markiere als angewendet…', 95)
+    # 4. Swap VERIFIZIEREN, bevor wir den Zustand als 'angewendet' markieren.
+    #    Schlägt der Tausch fehl, brechen wir hart ab (Flag bleibt unverändert →
+    #    Disk-Wahrheit und Anzeige bleiben konsistent).
+    if not os.path.isdir(ept_target) or not os.path.isdir(ept_backup):
+        raise RuntimeError('Apply-Swap fehlgeschlagen: EPT-Ziel oder -Backup fehlt nach dem Tausch.')
+    if os.path.isfile(realigned_glb) and not os.path.isfile(glb_target):
+        raise RuntimeError('Apply-Swap fehlgeschlagen: GLB-Ziel fehlt nach dem Tausch.')
+
+    # 5. project_data: alignment_transform.applied = True (nur Cache — autoritativ ist
+    #    der Disk-Zustand via Status-Endpoint). Dann die frame-abhängigen Sims löschen:
+    #    Heatmap/PV-Anlagen wurden im ALTEN GLB-Frame berechnet und sind nach dem
+    #    Frame-Wechsel geometrisch ungültig.
+    _progress('Markiere als angewendet, räume Sims auf…', 95)
     from coreplugins.project_data.models import ProjectEntry
     entries = ProjectEntry.objects.filter(
         project_id=project_id_str,
@@ -235,6 +254,23 @@ def _run_apply_task(project_id_str, task_id_str, assets_root, realigned_dir, pro
         data['applied'] = True
         entry.data = data
         entry.save(update_fields=['data', 'updated_at'])
+
+    stale = ProjectEntry.objects.filter(
+        project_id=project_id_str,
+        task_id=task_id_str,
+        entry_type__in=('heatmap', 'pvsim'),
+    ).prefetch_related('attachments')
+    for entry in stale:
+        for att in entry.attachments.all():
+            try:
+                att.file.delete(save=False)  # Attachment-Datei entfernen (Django löscht sie sonst nicht)
+            except Exception:
+                pass
+        entry.delete()  # cascade löscht die Attachment-DB-Zeilen
+
+    # 6. Trash nachgelagert löschen — der Live-Zustand ist hier bereits korrekt+persistiert.
+    if os.path.isdir(ept_trash):
+        shutil.rmtree(ept_trash, ignore_errors=True)
 
     _progress('Fertig', 100)
     return {'ok': True}
