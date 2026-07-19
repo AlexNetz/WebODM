@@ -22,6 +22,7 @@ class ProjectEntry(models.Model):
     TASK_SETTINGS = 'task_settings'        # per-Task flags wie {global: true} (Roof-S admin override)
     HEATMAP = 'heatmap'                    # PV-Verschattungs-Heatmap (GLB als Attachment, Meta in data)
     PVSIM = 'pvsim'                        # PV-Simulation aus K2-DXF (result.glb + bereich.dxf, Meta in data)
+    SPLAT = 'splat'                        # Gaussian Splat (.sog als Attachment, Meta in data)
 
     ENTRY_TYPES = [
         (ANNOTATION, 'Annotation'),
@@ -41,6 +42,7 @@ class ProjectEntry(models.Model):
         (TASK_SETTINGS, 'Task Settings'),
         (HEATMAP, 'Heatmap'),
         (PVSIM, 'PV Simulation'),
+        (SPLAT, 'Gaussian Splat'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
