@@ -100,7 +100,11 @@ async function main() {
                 limitInputPixels: true,
         }),
         draco({
-            quantizationVolume: "scene"
+            // "scene" backt Node-Transforms in die Vertices (Float32!) — bei GLBs mit
+            // UTM-Root-Matrix (MipMap-Import, B·v-Konvention) entsteht dadurch ein
+            // 0,5-m-Quantisierungsraster (ULP bei Northing ~5,4 Mio). "mesh" quantisiert
+            // pro Mesh-BBox in lokalen Koordinaten: gemessen 1,4 mm statt 500 mm.
+            quantizationVolume: "mesh"
         })
     ];
 
