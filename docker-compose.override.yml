@@ -12,6 +12,7 @@ services:
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
       - ./app/plugins/views.py:/webodm/app/plugins/views.py:ro  # Roof-S csrf_exempt patch (JWT-POST über Plugin)
+      - ./app/scripts/glbopti.js:/webodm/app/scripts/glbopti.js:ro  # Roof-S Draco-Fix: quantizationVolume mesh (scene backt UTM in Float32-Vertices)
       - point2cad_data:/data   # shared with point2cad service — CADMeshView reads mesh.ply from here
   worker:
     entrypoint: /bin/bash -c "pip install laspy pygltflib trimesh -q && /webodm/wait-for-postgres.sh db /webodm/wait-for-it.sh -t 0 broker:6379 -- /webodm/wait-for-it.sh -t 0 webapp:8000 -- /webodm/worker.sh start"
@@ -23,6 +24,7 @@ services:
       - ./app/models/__init__.py:/webodm/app/models/__init__.py:ro
       - ./app/models/redirect.py:/webodm/app/models/redirect.py:ro
       - ./app/plugins/views.py:/webodm/app/plugins/views.py:ro  # Roof-S csrf_exempt patch (JWT-POST über Plugin)
+      - ./app/scripts/glbopti.js:/webodm/app/scripts/glbopti.js:ro  # Roof-S Draco-Fix: quantizationVolume mesh
       - point2cad_data:/data   # shared with point2cad service
 
   # point2cad microservice — requires image to be available on the host:
