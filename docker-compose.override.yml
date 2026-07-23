@@ -26,6 +26,11 @@ services:
       - ./app/plugins/views.py:/webodm/app/plugins/views.py:ro  # Roof-S csrf_exempt patch (JWT-POST über Plugin)
       - ./app/scripts/glbopti.js:/webodm/app/scripts/glbopti.js:ro  # Roof-S Draco-Fix: quantizationVolume mesh
       - point2cad_data:/data   # shared with point2cad service
+  node-odm-1:
+    volumes:
+      # NodeODM-Daten auf festem Host-Pfad — die Splat-Pipeline (DooD) liest die
+      # Task-Bilder von dort; war bisher nur als Server-Hand-Edit vorhanden.
+      - /opt/roof-s/nodeodm-data:/var/www/data
 
   # point2cad microservice — requires image to be available on the host:
   #   docker load < point2cad.tar   or   docker pull <your-registry>/point2cad:latest
