@@ -23,6 +23,7 @@ class ProjectEntry(models.Model):
     HEATMAP = 'heatmap'                    # PV-Verschattungs-Heatmap (GLB als Attachment, Meta in data)
     PVSIM = 'pvsim'                        # PV-Simulation aus K2-DXF (result.glb + bereich.dxf, Meta in data)
     SPLAT = 'splat'                        # Gaussian Splat (.sog als Attachment, Meta in data)
+    CROP_REGION = 'crop_region'            # Gespeicherter Zuschnitt (Name in title, Polygon in data.points, UTM)
 
     ENTRY_TYPES = [
         (ANNOTATION, 'Annotation'),
@@ -43,6 +44,7 @@ class ProjectEntry(models.Model):
         (HEATMAP, 'Heatmap'),
         (PVSIM, 'PV Simulation'),
         (SPLAT, 'Gaussian Splat'),
+        (CROP_REGION, 'Crop Region'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
