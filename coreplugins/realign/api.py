@@ -8,6 +8,7 @@ from app.plugins.worker import run_function_async
 from worker.tasks import TestSafeAsyncResult
 
 from .tasks import _run_export_task, _run_apply_task
+from .export_source import export_glb_source
 
 
 class ExportView(TaskView):
@@ -41,9 +42,9 @@ class ExportView(TaskView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-        glb_path = task.get_asset_download_path('textured_model.glb')
-        if not os.path.isfile(glb_path):
-            glb_path = None
+        # Bei angewendeter Ausrichtung das gesicherte Original nehmen — das aktuelle GLB ist
+        # schon ausgerichtet, der Export würde die Matrix sonst doppelt anwenden.
+        glb_path = export_glb_source(task.assets_path(), task.get_asset_download_path('textured_model.glb'))
 
         output_dir = task.assets_path('realigned')
 
