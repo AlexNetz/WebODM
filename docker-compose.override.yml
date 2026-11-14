@@ -4,6 +4,16 @@
 version: "3.4"
 services:
   webapp:
+    # Wie in docker-compose.yml, davor wird der Zustand des Zeitplaners (celery beat)
+    # verworfen. Die Datei hält nur die letzten Laufzeiten. Wird der Container hart
+    # beendet (der Server fährt täglich herunter), kann sie unbrauchbar werden; dann
+    # stürzt der Zeitplaner bei jedem Start ab ("_dbm.error: cannot add item to
+    # database"), alle Knoten gelten als offline und gelöschte Projekte bleiben liegen.
+    # Die alte PID-Datei muss auch weg: worker.sh würde sonst per kill -9 den Prozess
+    # treffen, der diese Nummer inzwischen trägt.
+    # Prüfen, ob der Zeitplaner läuft: docker top webapp | grep beat
+    # Bei einem WebODM-Update mit dem entrypoint in docker-compose.yml abgleichen.
+    entrypoint: /bin/bash -c "rm -f /webodm/celerybeat-schedule* /webodm/celerybeat.pid; service cron start && chmod +x /webodm/*.sh && /bin/bash -c \"/webodm/wait-for-postgres.sh db /webodm/wait-for-it.sh -t 0 broker:6379 -- /webodm/start.sh\""
     volumes:
       - ./coreplugins/project_data:/webodm/coreplugins/project_data:ro
       - ./coreplugins/roof_detect:/webodm/coreplugins/roof_detect:ro
