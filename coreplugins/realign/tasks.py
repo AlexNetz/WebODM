@@ -97,6 +97,12 @@ def _run_export_task(laz_path, glb_path, matrix, output_dir, geo_offset=None, pr
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Veraltete Matrix-Datei weg: sie gehört zu den Dateien des vorigen Exports.
+    from coreplugins.realign.data_transform import save_matrix_file
+    matrix_file = os.path.join(output_dir, 'matrix.json')
+    if os.path.isfile(matrix_file):
+        os.remove(matrix_file)
+
     _progress('Starte LAZ-Export…', 2)
 
     if not os.path.isfile(laz_path):
@@ -143,6 +149,8 @@ def _run_export_task(laz_path, glb_path, matrix, output_dir, geo_offset=None, pr
     else:
         _progress('Kein GLB vorhanden, überspringe…', 90)
 
+    save_matrix_file(matrix_file, matrix)
+
     _progress('Fertig', 100)
     return result
 
@@ -180,10 +188,24 @@ def _run_apply_task(project_id_str, task_id_str, assets_root, realigned_dir, pro
             '. Bitte zuerst den Export ausführen.'
         )
 
+    from coreplugins.realign.data_transform import load_matrix_file
+    from coreplugins.realign.frame_state import switch_data_frame
+
+    # Matrix der exportierten Dateien — vor jedem Dateizugriff prüfen.
+    matrix = load_matrix_file(os.path.join(realigned_dir, 'matrix.json'))
+    if matrix is None:
+        raise RuntimeError(
+            'Die erzeugten Files stammen aus einer älteren Version. '
+            'Bitte „Files erzeugen" erneut ausführen.'
+        )
+
     ept_target     = os.path.join(assets_root, 'entwine_pointcloud')
     ept_backup     = os.path.join(assets_root, 'entwine_pointcloud_original')
     glb_target     = os.path.join(assets_root, 'odm_texturing', 'odm_textured_model_geo.glb')
     glb_backup     = os.path.join(assets_root, 'odm_texturing', 'odm_textured_model_geo.original.glb')
+
+    # War schon eine Ausrichtung angewendet? Muss VOR dem Backup-Schritt feststehen.
+    was_applied = os.path.isdir(ept_backup) or os.path.isfile(glb_backup)
 
     # 1. Regenerate EPT from realigned LAZ
     _progress('Erzeuge Entwine-Octree…', 5)
@@ -237,6 +259,10 @@ def _run_apply_task(project_id_str, task_id_str, assets_root, realigned_dir, pro
         raise RuntimeError('Apply-Swap fehlgeschlagen: EPT-Ziel oder -Backup fehlt nach dem Tausch.')
     if os.path.isfile(realigned_glb) and not os.path.isfile(glb_target):
         raise RuntimeError('Apply-Swap fehlgeschlagen: GLB-Ziel fehlt nach dem Tausch.')
+
+    # 4b. Gespeicherte Punkte in den neuen Rahmen umrechnen (eine Transaktion).
+    _progress('Rechne gespeicherte Punkte um…', 90)
+    switch_data_frame(project_id_str, task_id_str, matrix, was_applied)
 
     # 5. project_data: alignment_transform.applied = True (nur Cache — autoritativ ist
     #    der Disk-Zustand via Status-Endpoint). Dann die frame-abhängigen Sims löschen:

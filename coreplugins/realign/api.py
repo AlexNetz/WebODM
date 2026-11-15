@@ -9,6 +9,8 @@ from worker.tasks import TestSafeAsyncResult
 
 from .tasks import _run_export_task, _run_apply_task
 from .export_source import export_glb_source
+from .data_transform import validate_similarity, load_matrix_file
+from .frame_state import read_state, switch_data_frame
 
 
 class ExportView(TaskView):
@@ -28,6 +30,9 @@ class ExportView(TaskView):
                 {'error': 'matrix enthält ungültige Werte.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        ok, err = validate_similarity(matrix)
+        if not ok:
+            return Response({'error': err}, status=status.HTTP_400_BAD_REQUEST)
 
         # Resolve source file paths (get_asset_download_path returns an absolute path
         # for string-valued ASSETS_MAP entries without checking existence)
@@ -159,10 +164,13 @@ class ExportFilesStatusView(TaskView):
         assets_root = task.assets_path()
         ept_backup = os.path.join(assets_root, 'entwine_pointcloud_original')
         glb_backup = os.path.join(assets_root, 'odm_texturing', 'odm_textured_model_geo.original.glb')
+        state = read_state(task.project_id, task.id)
         return Response({
             'laz': os.path.isfile(os.path.join(realigned_dir, 'model_realigned.laz')),
             'glb': os.path.isfile(os.path.join(realigned_dir, 'model_realigned.glb')),
             'applied': os.path.isdir(ept_backup) or os.path.isfile(glb_backup),
+            'frame_rev': state['frame_rev'],
+            'export_matrix': load_matrix_file(os.path.join(realigned_dir, 'matrix.json')),
         })
 
 
@@ -179,6 +187,13 @@ class ApplyView(TaskView):
             return Response(
                 {'error': 'Keine realignte Punktwolke gefunden. '
                           'Bitte zuerst den Export ausführen.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if load_matrix_file(os.path.join(realigned_dir, 'matrix.json')) is None:
+            return Response(
+                {'error': 'Die erzeugten Files stammen aus einer älteren Version. '
+                          'Bitte „Files erzeugen" erneut ausführen.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -275,6 +290,13 @@ class RevertView(TaskView):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+        # Gespeicherte Punkte zurück in den Rohrahmen rechnen (eine Transaktion, nicht still).
+        revert_error = None
+        try:
+            switch_data_frame(task.project_id, task.id, None, True)
+        except Exception as e:
+            revert_error = str(e)
+
         # project_data: alignment_transform.applied = False (nur Cache — autoritativ ist die
         # Disk-Wahrheit). Frame-abhängige Sims (Heatmap/PV) löschen: sie wurden im jetzt
         # verworfenen ausgerichteten Frame berechnet und sind nach dem Frame-Wechsel ungültig.
@@ -307,5 +329,12 @@ class RevertView(TaskView):
         # Verworfenen Octree nachgelagert löschen — der Live-Zustand ist hier bereits korrekt.
         if os.path.isdir(ept_trash):
             shutil.rmtree(ept_trash, ignore_errors=True)
+
+        if revert_error is not None:
+            return Response(
+                {'error': 'Original-Dateien wiederhergestellt, aber gespeicherte Punkte '
+                          'konnten nicht zurückgerechnet werden: ' + revert_error},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         return Response({'ok': True}, status=status.HTTP_200_OK)
