@@ -92,17 +92,21 @@ class DataTransformTest(unittest.TestCase):
 
     def test_validate_similarity_lehnt_ab(self):
         ungleich = list(IDENTITY); ungleich[0] = 2.0
-        scherung = list(IDENTITY); scherung[4] = 0.5
+        scherung = list(IDENTITY); scherung[4], scherung[5] = 0.6, 0.8
         spiegel = list(IDENTITY); spiegel[0] = -1.0
         zu_gross = scale_about(C, 200.0)
         nan = list(IDENTITY); nan[12] = float('nan')
         letzte_zeile = list(IDENTITY); letzte_zeile[3] = 0.1
-        for bad in (ungleich, scherung, spiegel, zu_gross, nan, letzte_zeile,
-                    IDENTITY[:15], None, 'x', [True] * 16):
+        # Jeder Fall muss seinen eigenen Zweig treffen (Teilstring der Fehlermeldung).
+        faelle = ((ungleich, 'ungleichmäßig'), (scherung, 'Scherung'), (spiegel, 'spiegelt'),
+                  (zu_gross, 'zwischen'), (nan, '16 endlichen'), (letzte_zeile, 'letzte Zeile'),
+                  (IDENTITY[:15], '16 endlichen'), (None, '16 endlichen'), ('x', '16 endlichen'),
+                  ([True] * 16, '16 endlichen'))
+        for bad, teil in faelle:
             ok, err = dt.validate_similarity(bad)
             self.assertFalse(ok)
             self.assertIsInstance(err, str)
-            self.assertTrue(err)
+            self.assertIn(teil, err)
 
     def test_transform_scene(self):
         scene = {
@@ -132,6 +136,10 @@ class DataTransformTest(unittest.TestCase):
         self.assertEqual(dt.transform_scene({}, S), {})
         self.assertEqual(dt.transform_scene(None, S), None)
         self.assertEqual(dt.transform_scene('x', S), 'x')
+        liste = [1, 2]
+        kopie = dt.transform_entry_data('user_scene', liste, S, 1.5)
+        self.assertEqual(kopie, liste)
+        self.assertIsNot(kopie, liste)  # Ergebnis ist immer eine Kopie
         kaputt = {'measurements': 'x', 'annotations': None, 'view': [1]}
         self.assertEqual(dt.transform_scene(kaputt, S), kaputt)
 

@@ -153,7 +153,7 @@ def _transform_view(view, m):
 def transform_scene(scene, m):
     """Rechnet Messpunkte, Annotationen und Kamera einer Potree-Szene um; Eingabe bleibt unverändert."""
     if not isinstance(scene, dict):
-        return scene
+        return copy.deepcopy(scene)
     out = copy.deepcopy(scene)
     if isinstance(out.get('measurements'), list):
         for meas in out['measurements']:
