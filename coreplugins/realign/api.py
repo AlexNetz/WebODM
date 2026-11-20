@@ -16,6 +16,8 @@ from .frame_state import read_state, switch_data_frame
 class ExportView(TaskView):
     def post(self, request, pk=None, project_pk=None):
         task = self.get_and_check_task(request, pk)
+        if not request.user.is_superuser:
+            return Response({'error': 'Nur Admins dürfen Ausrichtung und Maßstab ändern.'}, status=403)
 
         matrix = request.data.get('matrix')
         if not isinstance(matrix, list) or len(matrix) != 16:
@@ -179,6 +181,8 @@ class ApplyView(TaskView):
 
     def post(self, request, pk=None, project_pk=None):
         task = self.get_and_check_task(request, pk)
+        if not request.user.is_superuser:
+            return Response({'error': 'Nur Admins dürfen Ausrichtung und Maßstab ändern.'}, status=403)
 
         realigned_dir = task.assets_path('realigned')
         realigned_laz = os.path.join(realigned_dir, 'model_realigned.laz')
@@ -252,6 +256,8 @@ class RevertView(TaskView):
 
     def post(self, request, pk=None, project_pk=None):
         task = self.get_and_check_task(request, pk)
+        if not request.user.is_superuser:
+            return Response({'error': 'Nur Admins dürfen Ausrichtung und Maßstab ändern.'}, status=403)
         assets_root = task.assets_path()
 
         ept_target = os.path.join(assets_root, 'entwine_pointcloud')
