@@ -260,9 +260,26 @@ def _run_apply_task(project_id_str, task_id_str, assets_root, realigned_dir, pro
     if os.path.isfile(realigned_glb) and not os.path.isfile(glb_target):
         raise RuntimeError('Apply-Swap fehlgeschlagen: GLB-Ziel fehlt nach dem Tausch.')
 
-    # 4b. Gespeicherte Punkte in den neuen Rahmen umrechnen (eine Transaktion).
+    # 4a. Gehört die Matrix noch zu den getauschten Dateien? Ein paralleler Export („Files erzeugen" in einem
+    #     anderen Tab) schreibt LAZ, GLB und matrix.json neu, während entwine läuft bzw. vor dem GLB-Kopieren.
+    #     Dann wäre `matrix` nicht mehr die Matrix der Dateien → laut abbrechen, keine Daten umrechnen.
+    matrix_now = load_matrix_file(os.path.join(realigned_dir, 'matrix.json'))
+    if matrix_now is None or matrix_now != matrix:
+        raise RuntimeError(
+            'Während des Anwendens wurden neue Files erzeugt. Bitte „Original wiederherstellen", '
+            'Files erneut erzeugen und anwenden.'
+        )
+
+    # 4b. Gespeicherte Punkte in den neuen Rahmen umrechnen (eine Transaktion). Die Dateien sind hier schon
+    #     getauscht — ein Fehler braucht einen klaren Text, wie es weitergeht.
     _progress('Rechne gespeicherte Punkte um…', 90)
-    switch_data_frame(project_id_str, task_id_str, matrix, was_applied)
+    try:
+        switch_data_frame(project_id_str, task_id_str, matrix, was_applied)
+    except Exception as e:
+        raise RuntimeError(
+            'Dateien getauscht, aber gespeicherte Punkte nicht umgerechnet. '
+            'Bitte „Original wiederherstellen" und danach erneut anwenden. Ursache: ' + str(e)
+        ) from e
 
     # 5. project_data: alignment_transform.applied = True (nur Cache — autoritativ ist
     #    der Disk-Zustand via Status-Endpoint). Dann die frame-abhängigen Sims löschen:

@@ -261,6 +261,19 @@ class RevertView(TaskView):
         glb_backup = os.path.join(assets_root, 'odm_texturing', 'odm_textured_model_geo.original.glb')
 
         if not os.path.isdir(ept_backup) and not os.path.isfile(glb_backup):
+            # Dateien stehen schon im Rohrahmen. Hängen die gespeicherten Punkte noch im ausgerichteten Rahmen
+            # (eine frühere Rück-Umrechnung ist gescheitert), wird sie hier nachgeholt — Wiederherstellen ist
+            # für die Daten wiederholbar.
+            if read_state(task.project_id, task.id)['data_matrix'] is not None:
+                try:
+                    switch_data_frame(task.project_id, task.id, None, True)
+                except Exception as e:
+                    return Response(
+                        {'error': 'Original-Dateien wiederhergestellt, aber gespeicherte Punkte '
+                                  'konnten nicht zurückgerechnet werden: ' + str(e)},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    )
+                return Response({'ok': True}, status=status.HTTP_200_OK)
             return Response(
                 {'error': 'Kein Original-Backup vorhanden. Apply wurde nie ausgeführt.'},
                 status=status.HTTP_404_NOT_FOUND,
